@@ -1,0 +1,6 @@
+{
+  "name": "HUH",
+  "description": "تطبيق تواصل اجتماعي، دردشة عشوائية، وبث مباشر بنظام النقاط والوكالات",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

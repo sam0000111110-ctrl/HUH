@@ -1,0 +1,14 @@
+{
+  "name": "ayer-calls-backend",
+  "version": "1.0.0",
+  "description": "Authoritative LiveKit token broker, 1-on-1 call signaling/accounting, and budget governance service for Ayer/HUH",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test test/*.test.js"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
