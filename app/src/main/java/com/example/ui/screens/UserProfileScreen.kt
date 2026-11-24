@@ -381,7 +381,6 @@ fun UserProfileScreen(
     onOpenNotificationCenter: () -> Unit = {},
     onOpenCreateSecondaryProfileDialog: () -> Unit = {},
     onOpenAgenciesScreen: () -> Unit = {},
-    onOpenCallAdminDashboard: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -716,78 +715,6 @@ https://ayer.app/u/${userProfile.id}
                         onCreateSecondaryProfile = onOpenCreateSecondaryProfileDialog,
                         onLogout = { viewModel.logoutUser() }
                     )
-                }
-            }
-
-            // ==========================================
-            // 13. Call Management & Monitoring (Admin Owner Control)
-            // ==========================================
-            item {
-                AnimatedEntranceCard(index = 13) {
-                    Card(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("profile_call_admin_card"),
-                        shape = RoundedCornerShape(20.dp),
-                        colors = CardDefaults.cardColors(containerColor = HuhTheme.colors.surfaceElevated),
-                        border = BorderStroke(1.dp, AyerCyan.copy(alpha = 0.45f))
-                    ) {
-                        Column(modifier = Modifier.padding(16.dp)) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Box(
-                                        modifier = Modifier
-                                            .size(38.dp)
-                                            .clip(CircleShape)
-                                            .background(AyerCyan.copy(alpha = 0.16f)),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Default.Videocam,
-                                            contentDescription = "إدارة المكالمات",
-                                            tint = AyerCyan,
-                                            modifier = Modifier.size(20.dp)
-                                        )
-                                    }
-                                    Spacer(modifier = Modifier.width(10.dp))
-                                    Column {
-                                        Text(
-                                            text = "Call Management & Monitoring",
-                                            color = HuhTheme.colors.textPrimary,
-                                            fontWeight = FontWeight.Bold,
-                                            fontSize = 14.sp
-                                        )
-                                        Text(
-                                            text = "مراقبة المكالمات الصوتية والمرئية والميزانية والحدود",
-                                            color = HuhTheme.colors.textSecondary,
-                                            fontSize = 11.sp
-                                        )
-                                    }
-                                }
-                            }
-                            Spacer(modifier = Modifier.height(12.dp))
-                            Button(
-                                onClick = onOpenCallAdminDashboard,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .height(46.dp)
-                                    .testTag("profile_open_call_admin_button"),
-                                shape = RoundedCornerShape(12.dp),
-                                colors = ButtonDefaults.buttonColors(containerColor = HuhTheme.colors.primary)
-                            ) {
-                                Text(
-                                    text = "فتح لوحة مراقبة وإدارة المكالمات 📊",
-                                    color = Color.White,
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 13.sp
-                                )
-                            }
-                        }
-                    }
                 }
             }
         }

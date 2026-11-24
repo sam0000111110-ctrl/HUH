@@ -526,8 +526,7 @@ fun MainScreen(viewModel: AyerViewModel) {
                             onNavigateToStore = { currentScreen = AyerScreen.Wallet },
                             onOpenNotificationCenter = { showNotificationCenterDialog = true },
                             onOpenCreateSecondaryProfileDialog = { showCreateSecondaryProfileDialog = true },
-                            onOpenAgenciesScreen = { currentScreen = AyerScreen.Agency },
-                            onOpenCallAdminDashboard = { showCallAdminDashboard = true }
+                            onOpenAgenciesScreen = { currentScreen = AyerScreen.Agency }
                         )
                     }
                 }
