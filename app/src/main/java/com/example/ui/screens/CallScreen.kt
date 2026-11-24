@@ -47,6 +47,7 @@ import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.SignalCellularAlt
+import androidx.compose.material.icons.filled.Translate
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.VideocamOff
 import androidx.compose.material.icons.filled.VolumeDown
@@ -271,21 +272,28 @@ fun CallScreen(
     isSwitchingCamera: Boolean = false,
     isCameraSwitchInProgress: Boolean = isSwitchingCamera,
     isTorchOn: Boolean = false,
+    isTranslationEnabled: Boolean = false,
+    liveSubtitles: String? = null,
     onToggleAudio: () -> Unit = {},
     onToggleCamera: () -> Unit = {},
     onSwitchCamera: () -> Unit = {},
     onToggleTorch: () -> Unit = {},
     onToggleSpeaker: () -> Unit = {},
+    onToggleTranslation: () -> Unit = {},
     onEndCall: () -> Unit = {},
     onDisposeCallResources: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
+    val callContext = LocalContext.current
     var controlsVisible by remember { mutableStateOf(true) }
     val currentDisposeCallResources by rememberUpdatedState(onDisposeCallResources)
 
-    // Properly dispose call & hardware resources when the CallScreen composable leaves composition
+    // Properly dispose call & hardware resources and enforce FLAG_SECURE while CallScreen is active
     DisposableEffect(Unit) {
+        val activity = com.example.util.SecurityUtils.findActivity(callContext)
+        com.example.util.SecurityUtils.setScreenCaptureProtection(activity, true)
         onDispose {
+            com.example.util.SecurityUtils.setScreenCaptureProtection(activity, false)
             try {
                 currentDisposeCallResources()
             } catch (e: Throwable) {
@@ -701,27 +709,82 @@ fun CallScreen(
                     }
                 }
 
-                // Call Duration Counter Badge
-                Surface(
-                    color = Color(0xFF1E1338).copy(alpha = 0.85f),
-                    shape = RoundedCornerShape(16.dp),
-                    border = BorderStroke(1.dp, AyerCyan.copy(alpha = 0.5f))
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    val minutes = callDurationSeconds / 60
-                    val seconds = callDurationSeconds % 60
-                    val badgeText = when (callState) {
-                        CallLifecycleState.DIALING, CallLifecycleState.RINGING_OUTGOING -> "يرن 🔔"
-                        CallLifecycleState.RECONNECTING -> "مؤقت متوقف ⏸"
-                        else -> String.format("%02d:%02d", minutes, seconds)
-                    }
-                    Text(
-                        text = badgeText,
-                        color = if (callState == CallLifecycleState.RECONNECTING) Color(0xFFFFCA28) else AyerCyan,
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.Bold,
+                    IconButton(
+                        onClick = onToggleTranslation,
                         modifier = Modifier
-                            .padding(horizontal = 12.dp, vertical = 6.dp)
-                            .testTag("call_duration_badge")
+                            .size(34.dp)
+                            .clip(CircleShape)
+                            .background(
+                                if (isTranslationEnabled) AyerCyan.copy(alpha = 0.25f)
+                                else Color.White.copy(alpha = 0.14f)
+                            )
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Translate,
+                            contentDescription = "ترجمة AI الفورية",
+                            tint = if (isTranslationEnabled) AyerCyan else Color.White,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+
+                    // Call Duration Counter Badge
+                    Surface(
+                        color = Color(0xFF1E1338).copy(alpha = 0.85f),
+                        shape = RoundedCornerShape(16.dp),
+                        border = BorderStroke(1.dp, AyerCyan.copy(alpha = 0.5f))
+                    ) {
+                        val minutes = callDurationSeconds / 60
+                        val seconds = callDurationSeconds % 60
+                        val badgeText = when (callState) {
+                            CallLifecycleState.DIALING, CallLifecycleState.RINGING_OUTGOING -> "يرن 🔔"
+                            CallLifecycleState.RECONNECTING -> "مؤقت متوقف ⏸"
+                            else -> String.format("%02d:%02d", minutes, seconds)
+                        }
+                        Text(
+                            text = badgeText,
+                            color = if (callState == CallLifecycleState.RECONNECTING) Color(0xFFFFCA28) else AyerCyan,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier
+                                .padding(horizontal = 12.dp, vertical = 6.dp)
+                                .testTag("call_duration_badge")
+                        )
+                    }
+                }
+            }
+        }
+
+        if (isTranslationEnabled && !liveSubtitles.isNullOrBlank()) {
+            Surface(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .navigationBarsPadding()
+                    .padding(bottom = 124.dp, start = 20.dp, end = 20.dp),
+                shape = RoundedCornerShape(14.dp),
+                color = Color.Black.copy(alpha = 0.78f),
+                border = BorderStroke(1.dp, AyerCyan.copy(alpha = 0.6f))
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Translate,
+                        contentDescription = null,
+                        tint = AyerCyan,
+                        modifier = Modifier.size(15.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = liveSubtitles,
+                        color = Color.White,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium,
+                        textAlign = TextAlign.Center
                     )
                 }
             }
@@ -1043,11 +1106,14 @@ fun CallScreen(
             isSwitchingCamera = isSwitching,
             isCameraSwitchInProgress = isSwitching,
             isTorchOn = session.isTorchOn,
+            isTranslationEnabled = session.isTranslationEnabled,
+            liveSubtitles = session.liveSubtitles,
             onToggleAudio = { viewModel.toggleCallMute() },
             onToggleCamera = { viewModel.toggleCallCamera() },
             onSwitchCamera = { viewModel.toggleCameraFlip() },
             onToggleTorch = { viewModel.toggleCallTorch() },
             onToggleSpeaker = { viewModel.toggleCallSpeaker() },
+            onToggleTranslation = { viewModel.toggleCallTranslation() },
             onEndCall = onEndCall,
             onDisposeCallResources = { viewModel.disposeWebRTCResources() },
             modifier = modifier

@@ -40,6 +40,8 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedTextField
@@ -53,6 +55,8 @@ import androidx.compose.material3.TabRowDefaults.tabIndicatorOffset
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -64,7 +68,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -84,6 +91,7 @@ import com.example.ui.theme.AyerSurface
 import com.example.ui.theme.AyerSurfaceElevated
 import com.example.ui.theme.AyerSurfaceVariant
 import com.example.ui.theme.HuhTheme
+import com.example.util.SecurityUtils
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -94,17 +102,35 @@ fun AgenciesScreen(
     onOpenCallAdminDashboard: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
+    DisposableEffect(Unit) {
+        val activity = SecurityUtils.findActivity(context)
+        SecurityUtils.setScreenCaptureProtection(activity, true)
+        onDispose {
+            SecurityUtils.setScreenCaptureProtection(activity, false)
+        }
+    }
+
+    val clipboardManager = LocalClipboardManager.current
     var showInviteDialog by remember { mutableStateOf(false) }
     var showAdminCommissionModal by remember { mutableStateOf(false) }
     var showAdminAddStreamModal by remember { mutableStateOf(false) }
+    var showBankPayoutModal by remember { mutableStateOf(false) }
+    var referralCopied by remember { mutableStateOf(false) }
     var newAgentName by remember { mutableStateOf("") }
     var newAgentCountry by remember { mutableStateOf("المملكة العربية السعودية") }
     var selectedTab by remember { mutableIntStateOf(0) }
     var adminCommissionSlider by remember { mutableFloatStateOf(userProfile.agentCommissionPercent.toFloat()) }
 
-    val subAgentsList = remember { viewModel.getSubAgents() }
+    LaunchedEffect(Unit) {
+        viewModel.refreshAgencyDashboard()
+    }
+
+    val subAgentsList by viewModel.subAgentsList.collectAsStateWithLifecycle()
+    val myPayouts by viewModel.myPayouts.collectAsStateWithLifecycle()
     val unreadNotificationCount by viewModel.unreadNotificationCount.collectAsStateWithLifecycle()
     val notifications by viewModel.notifications.collectAsStateWithLifecycle()
+    val withdrawableCoins = userProfile.subAgentsEarningsCoins + userProfile.hostEarningsCoins
 
     LazyColumn(
         modifier = modifier
@@ -239,43 +265,47 @@ fun AgenciesScreen(
                                     }
                                 }
 
-                                Button(
-                                    onClick = { showAdminCommissionModal = true },
-                                    colors = ButtonDefaults.buttonColors(containerColor = AyerPrimaryContainer),
-                                    shape = RoundedCornerShape(10.dp),
-                                    modifier = Modifier.testTag("admin_commission_button")
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Tune,
-                                        contentDescription = null,
-                                        tint = Color.White,
-                                        modifier = Modifier.size(16.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(4.dp))
-                                    Text(text = "لوحة الأدمن", fontSize = 11.sp, color = Color.White)
+                                if (userProfile.isAdmin) {
+                                    Button(
+                                        onClick = { showAdminCommissionModal = true },
+                                        colors = ButtonDefaults.buttonColors(containerColor = AyerPrimaryContainer),
+                                        shape = RoundedCornerShape(10.dp),
+                                        modifier = Modifier.testTag("admin_commission_button")
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Tune,
+                                            contentDescription = null,
+                                            tint = Color.White,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text(text = "لوحة الأدمن", fontSize = 11.sp, color = Color.White)
+                                    }
                                 }
                             }
                         }
 
-                        Spacer(modifier = Modifier.height(10.dp))
+                        if (userProfile.isAdmin) {
+                            Spacer(modifier = Modifier.height(10.dp))
 
-                        Button(
-                            onClick = onOpenCallAdminDashboard,
-                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF0E293B)),
-                            shape = RoundedCornerShape(12.dp),
-                            border = androidx.compose.foundation.BorderStroke(1.dp, AyerCyan.copy(alpha = 0.6f)),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("agency_open_call_admin_button")
-                        ) {
-                            Icon(Icons.Default.QueryStats, contentDescription = null, tint = AyerCyan, modifier = Modifier.size(18.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(
-                                text = "Call Management & Monitoring (مراقبة وميزانية المكالمات)",
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = AyerCyan
-                            )
+                            Button(
+                                onClick = onOpenCallAdminDashboard,
+                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF0E293B)),
+                                shape = RoundedCornerShape(12.dp),
+                                border = androidx.compose.foundation.BorderStroke(1.dp, AyerCyan.copy(alpha = 0.6f)),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("agency_open_call_admin_button")
+                            ) {
+                                Icon(Icons.Default.QueryStats, contentDescription = null, tint = AyerCyan, modifier = Modifier.size(18.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "Call Management & Monitoring (مراقبة وميزانية المكالمات)",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = AyerCyan
+                                )
+                            }
                         }
 
                         Spacer(modifier = Modifier.height(14.dp))
@@ -298,8 +328,8 @@ fun AgenciesScreen(
                                 modifier = Modifier.weight(1f)
                             )
                             StatBox(
-                                title = "مكافأة الدعوة",
-                                value = "+250 نقطة",
+                                title = "طلبات السحب",
+                                value = "${myPayouts.size} طلب",
                                 color = Color(0xFF00E676),
                                 modifier = Modifier.weight(1f)
                             )
@@ -343,18 +373,29 @@ fun AgenciesScreen(
                         )
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.clickable {
-                                // simulated copy
-                            }
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .clickable {
+                                    if (userProfile.referralCode.isNotBlank()) {
+                                        clipboardManager.setText(AnnotatedString(userProfile.referralCode))
+                                        referralCopied = true
+                                    }
+                                }
+                                .padding(horizontal = 6.dp, vertical = 4.dp)
+                                .testTag("copy_referral_code_button")
                         ) {
                             Icon(
-                                imageVector = Icons.Default.ContentCopy,
-                                contentDescription = "نسخ",
-                                tint = AyerCyan,
+                                imageVector = if (referralCopied) Icons.Default.CheckCircle else Icons.Default.ContentCopy,
+                                contentDescription = "نسخ كود الدعوة",
+                                tint = if (referralCopied) Color(0xFF00E676) else AyerCyan,
                                 modifier = Modifier.size(18.dp)
                             )
                             Spacer(modifier = Modifier.width(4.dp))
-                            Text(text = "نسخ الرابط", fontSize = 12.sp, color = AyerCyan)
+                            Text(
+                                text = if (referralCopied) "تم النسخ" else "نسخ الكود",
+                                fontSize = 12.sp,
+                                color = if (referralCopied) Color(0xFF00E676) else AyerCyan
+                            )
                         }
                     }
 
@@ -493,51 +534,7 @@ fun AgenciesScreen(
                             }
                         }
 
-                        Spacer(modifier = Modifier.height(14.dp))
-
-                        // Simulation / Demo Trigger Buttons
-                        Text(
-                            text = "تجربة إرسال تنبيهات حية للمؤثرين:",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = AyerCyan
-                        )
-                        Spacer(modifier = Modifier.height(6.dp))
-
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            Button(
-                                onClick = { viewModel.triggerSampleCommissionPayout(750) },
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .height(38.dp)
-                                    .testTag("agency_payout_commission_button"),
-                                shape = RoundedCornerShape(10.dp),
-                                colors = ButtonDefaults.buttonColors(containerColor = AyerGold)
-                            ) {
-                                Icon(Icons.Default.MonetizationOn, contentDescription = null, tint = Color.Black, modifier = Modifier.size(14.dp))
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text("دفعة عمولة (+750💎)", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color.Black)
-                            }
-
-                            Button(
-                                onClick = { viewModel.triggerSampleReferralNotification() },
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .height(38.dp)
-                                    .testTag("agency_referral_recruit_button"),
-                                shape = RoundedCornerShape(10.dp),
-                                colors = ButtonDefaults.buttonColors(containerColor = AyerPrimary)
-                            ) {
-                                Icon(Icons.Default.PersonAdd, contentDescription = null, tint = Color.White, modifier = Modifier.size(14.dp))
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text("إحالة جديدة (+250💎)", fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                            }
-                        }
-
-                        Spacer(modifier = Modifier.height(8.dp))
+                        Spacer(modifier = Modifier.height(10.dp))
 
                         Row(
                             modifier = Modifier.fillMaxWidth(),
@@ -596,7 +593,7 @@ fun AgenciesScreen(
                             )
                             Spacer(modifier = Modifier.height(4.dp))
                             Text(
-                                text = "اضغط على الأزرار أعلاه لتجربة تنبيهات الإحالة أو العمولات الفورية",
+                                text = "ستظهر هنا تنبيهات الإحالات والعمولات وسحوباتك المعتمدة فور وصولها",
                                 fontSize = 12.sp,
                                 color = Color.Gray
                             )
@@ -613,7 +610,7 @@ fun AgenciesScreen(
                 }
             }
         } else {
-            // Cash Out & Guidelines
+            // Cash Out & Payout Requests History
             item {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
@@ -625,32 +622,69 @@ fun AgenciesScreen(
                         Text(text = "رصيد أرباح الوكالة القابل للسحب", fontSize = 12.sp, color = Color.LightGray)
                         Spacer(modifier = Modifier.height(2.dp))
                         Text(
-                            text = "${userProfile.subAgentsEarningsCoins + userProfile.hostEarningsCoins} نقطة",
+                            text = "$withdrawableCoins نقطة",
                             fontSize = 28.sp,
                             fontWeight = FontWeight.ExtraBold,
                             color = AyerGold
                         )
                         Text(
-                            text = "≈ $${(userProfile.subAgentsEarningsCoins + userProfile.hostEarningsCoins) / 10}.00 دولار أمريكي",
-                            fontSize = 13.sp,
+                            text = "≈ $${String.format("%.2f", withdrawableCoins / 10.0)} دولار أمريكي (الحد الأدنى للسحب 500 نقطة)",
+                            fontSize = 12.sp,
                             fontWeight = FontWeight.SemiBold,
                             color = Color(0xFF00E676)
                         )
                         Spacer(modifier = Modifier.height(12.dp))
                         Button(
-                            onClick = { viewModel.withdrawHostEarnings(500) },
+                            onClick = { showBankPayoutModal = true },
                             colors = ButtonDefaults.buttonColors(containerColor = AyerGold),
                             shape = RoundedCornerShape(14.dp),
-                            modifier = Modifier.fillMaxWidth()
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("open_bank_payout_modal_button")
                         ) {
                             Icon(imageVector = Icons.Default.AccountBalance, contentDescription = null, tint = Color.Black)
                             Spacer(modifier = Modifier.width(6.dp))
-                            Text(text = "سحب أرباح الوكالة إلى حسابك البنكي", color = Color.Black, fontWeight = FontWeight.Bold)
+                            Text(text = "تقديم طلب سحب بنكي للمراجعة", color = Color.Black, fontWeight = FontWeight.Bold)
                         }
                     }
                 }
 
                 Spacer(modifier = Modifier.height(14.dp))
+
+                Text(
+                    text = "سجل طلبات السحب (${myPayouts.size})",
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = HuhTheme.colors.textPrimary,
+                    modifier = Modifier.padding(bottom = 8.dp)
+                )
+
+                if (myPayouts.isEmpty()) {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(containerColor = AyerSurfaceElevated),
+                        shape = RoundedCornerShape(16.dp)
+                    ) {
+                        Text(
+                            text = "لا توجد طلبات سحب مسجلة حتى الآن. عند تقديم طلب سحب، سيتم حجز الرصيد ومراجعته من الإدارة.",
+                            fontSize = 12.sp,
+                            color = Color.LightGray,
+                            modifier = Modifier.padding(16.dp)
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(14.dp))
+                }
+            }
+
+            if (myPayouts.isNotEmpty()) {
+                items(myPayouts, key = { it.id }) { payout ->
+                    AgencyPayoutCard(payout = payout)
+                    Spacer(modifier = Modifier.height(10.dp))
+                }
+            }
+
+            item {
+                Spacer(modifier = Modifier.height(4.dp))
 
                 // Security and Compliance Banner
                 Card(
@@ -697,7 +731,7 @@ fun AgenciesScreen(
             text = {
                 Column {
                     Text(
-                        text = "عند انضمام الوكيل، ستحصل فوراً على 250 نقطة ترحيبية بالإضافة لنسبة ${userProfile.agentCommissionPercent}% من كل أرباح مضيفيه شهرياً.",
+                        text = "ستحصل على عمولة بنسبة ${userProfile.agentCommissionPercent}% من أرباح مضيفي الوكيل الفرعي وفق لوائح الوكالة المعتمدة.",
                         fontSize = 12.sp,
                         color = Color.LightGray
                     )
@@ -928,7 +962,7 @@ fun AgenciesScreen(
                             id = "agency_admin_${System.currentTimeMillis()}",
                             hostName = host,
                             title = clipTitleInput,
-                            viewersCount = (800..3200).random(),
+                            viewersCount = 0,
                             isVip = true,
                             agencyName = agencyNameInput,
                             previewClipSeconds = 4,
@@ -949,6 +983,211 @@ fun AgenciesScreen(
             },
             containerColor = AyerSurfaceElevated
         )
+    }
+
+    // Modal: Real Bank Payout Request
+    if (showBankPayoutModal) {
+        var amountInput by remember { mutableStateOf(if (withdrawableCoins >= 500) "500" else withdrawableCoins.toString()) }
+        var payoutMethod by remember { mutableStateOf("BANK_TRANSFER") }
+        var accountHolder by remember { mutableStateOf(userProfile.name) }
+        var bankName by remember { mutableStateOf("") }
+        var ibanOrAccount by remember { mutableStateOf("") }
+        var localError by remember { mutableStateOf<String?>(null) }
+        var isSubmitting by remember { mutableStateOf(false) }
+
+        AlertDialog(
+            onDismissRequest = { if (!isSubmitting) showBankPayoutModal = false },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(imageVector = Icons.Default.AccountBalance, contentDescription = null, tint = AyerGold)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "طلب سحب أرباح بنكي",
+                        fontSize = 17.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = AyerGold
+                    )
+                }
+            },
+            text = {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        text = "الرصيد القابل للسحب: $withdrawableCoins نقطة (≈ $${String.format("%.2f", withdrawableCoins / 10.0)})",
+                        fontSize = 12.sp,
+                        color = AyerCyan
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    OutlinedTextField(
+                        value = amountInput,
+                        onValueChange = { amountInput = it.filter { ch -> ch.isDigit() } },
+                        label = { Text("المبلغ بالنقاط (الحد الأدنى 500)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth().testTag("payout_amount_input")
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        listOf(
+                            "BANK_TRANSFER" to "تحويل بنكي",
+                            "INSTAPAY" to "InstaPay",
+                            "VODAFONE_CASH" to "محفظة كاش"
+                        ).forEach { (code, label) ->
+                            FilterChip(
+                                selected = payoutMethod == code,
+                                onClick = { payoutMethod = code },
+                                label = { Text(label, fontSize = 10.sp) },
+                                colors = FilterChipDefaults.filterChipColors(
+                                    selectedContainerColor = AyerPrimary,
+                                    selectedLabelColor = Color.White
+                                )
+                            )
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    OutlinedTextField(
+                        value = accountHolder,
+                        onValueChange = { accountHolder = it },
+                        label = { Text("اسم صاحب الحساب الثلاثي") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth().testTag("payout_holder_input")
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    OutlinedTextField(
+                        value = bankName,
+                        onValueChange = { bankName = it },
+                        label = { Text("اسم البنك أو المحفظة") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth().testTag("payout_bank_input")
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    OutlinedTextField(
+                        value = ibanOrAccount,
+                        onValueChange = { ibanOrAccount = it },
+                        label = { Text("رقم الآيبان (IBAN) أو رقم الحساب") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth().testTag("payout_iban_input")
+                    )
+
+                    if (localError != null) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(text = localError!!, fontSize = 11.sp, color = Color(0xFFFF5252))
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    enabled = !isSubmitting,
+                    onClick = {
+                        val coins = amountInput.toIntOrNull() ?: 0
+                        when {
+                            coins < 500 -> localError = "الحد الأدنى للسحب 500 نقطة."
+                            coins > withdrawableCoins -> localError = "رصيدك القابل للسحب غير كافٍ."
+                            accountHolder.isBlank() || bankName.isBlank() || ibanOrAccount.isBlank() -> {
+                                localError = "يرجى إكمال جميع بيانات الحساب البنكي."
+                            }
+                            else -> {
+                                localError = null
+                                isSubmitting = true
+                                viewModel.requestBankPayout(
+                                    amountCoins = coins,
+                                    payoutMethod = payoutMethod,
+                                    bankAccountHolder = accountHolder.trim(),
+                                    bankName = bankName.trim(),
+                                    ibanOrAccount = ibanOrAccount.trim()
+                                ) { success ->
+                                    isSubmitting = false
+                                    if (success) showBankPayoutModal = false
+                                }
+                            }
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = AyerGold),
+                    modifier = Modifier.testTag("submit_bank_payout_button")
+                ) {
+                    Text(if (isSubmitting) "جاري الإرسال..." else "إرسال الطلب للمراجعة", color = Color.Black, fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(enabled = !isSubmitting, onClick = { showBankPayoutModal = false }) {
+                    Text("إلغاء", color = Color.Gray)
+                }
+            },
+            containerColor = AyerSurfaceElevated
+        )
+    }
+}
+
+@Composable
+private fun AgencyPayoutCard(payout: com.example.data.remote.PayoutRequestDto) {
+    val (statusLabel, statusColor) = when (payout.status) {
+        "APPROVED" -> "معتمد للصرف" to Color(0xFF00E5FF)
+        "PAID" -> "تم التحويل" to Color(0xFF00E676)
+        "REJECTED" -> "مرفوض (مُسترد)" to Color(0xFFFF5252)
+        else -> "قيد المراجعة" to AyerGold
+    }
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(14.dp),
+        colors = CardDefaults.cardColors(containerColor = HuhTheme.colors.surfaceElevated),
+        border = androidx.compose.foundation.BorderStroke(1.dp, statusColor.copy(alpha = 0.35f))
+    ) {
+        Column(modifier = Modifier.padding(14.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "${payout.amountCoins} نقطة (≈ $${String.format("%.2f", payout.usdEquivalentCents / 100.0)})",
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = AyerGold
+                )
+                Surface(
+                    color = statusColor.copy(alpha = 0.16f),
+                    shape = RoundedCornerShape(8.dp),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, statusColor.copy(alpha = 0.5f))
+                ) {
+                    Text(
+                        text = statusLabel,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = statusColor,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                    )
+                }
+            }
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                text = "${payout.payoutMethod} • ${payout.bankName} (${payout.ibanOrAccount.takeLast(6).padStart(payout.ibanOrAccount.length.coerceAtMost(10), '*')})",
+                fontSize = 11.sp,
+                color = HuhTheme.colors.textSecondary
+            )
+            if (!payout.paymentReference.isNullOrBlank()) {
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "مرجع الحوالة: ${payout.paymentReference}",
+                    fontSize = 11.sp,
+                    color = Color(0xFF00E676),
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+            if (!payout.reviewerNote.isNullOrBlank()) {
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "ملاحظة الإدارة: ${payout.reviewerNote}",
+                    fontSize = 11.sp,
+                    color = Color.LightGray
+                )
+            }
+        }
     }
 }
 

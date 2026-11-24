@@ -138,6 +138,9 @@ fun LiveStreamScreen(
         val restrictedKeywords by viewModel.streamRestrictedKeywords.collectAsStateWithLifecycle()
         val activeViewers by viewModel.activeStreamViewers.collectAsStateWithLifecycle()
         val flaggedStreamIds by viewModel.flaggedStreamIds.collectAsStateWithLifecycle()
+        val livekitLocalTrack by viewModel.livekitLocalVideoTrack.collectAsStateWithLifecycle()
+        val livekitRemoteTrack by viewModel.livekitRemoteVideoTrack.collectAsStateWithLifecycle()
+        val isHost by viewModel.activeBroadcastIsHost.collectAsStateWithLifecycle()
         val isFlagged = flaggedStreamIds.contains(selectedStream.id)
 
         LiveRoomViewer(
@@ -150,6 +153,13 @@ fun LiveStreamScreen(
             restrictedKeywords = restrictedKeywords,
             activeViewers = activeViewers,
             isFlagged = isFlagged,
+            isHost = isHost,
+            localVideoTrack = livekitLocalTrack,
+            remoteVideoTrack = livekitRemoteTrack,
+            liveKitEngine = viewModel.callLiveKitEngine,
+            onToggleMute = { muted -> viewModel.setBroadcastMuted(muted) },
+            onToggleVideo = { enabled -> viewModel.setBroadcastVideoEnabled(enabled) },
+            onSwitchCamera = { front -> viewModel.switchBroadcastCamera(front) },
             onSubmitReport = { reason, details ->
                 viewModel.submitStreamReport(
                     streamId = selectedStream.id,
@@ -192,6 +202,9 @@ fun LiveStreamBrowseList(
     var selectedCategoryId by remember { mutableStateOf("ALL") }
     var isCategoryLoading by remember { mutableStateOf(false) }
     var sharingStream by remember { mutableStateOf<LiveStreamRoom?>(null) }
+    var showStartBroadcastDialog by remember { mutableStateOf(false) }
+    var broadcastTitle by remember { mutableStateOf("بثي المباشر") }
+    var broadcastCategory by remember { mutableStateOf("تعارف وسوالف") }
 
     val context = LocalContext.current
     var showPermissionRationaleDialog by remember { mutableStateOf(false) }
@@ -203,7 +216,7 @@ fun LiveStreamBrowseList(
         val cameraGranted = permissions[Manifest.permission.CAMERA] == true
         val audioGranted = permissions[Manifest.permission.RECORD_AUDIO] == true
         if (cameraGranted && audioGranted) {
-            viewModel.startUserLiveStream()
+            showStartBroadcastDialog = true
         } else {
             permissionDeniedExplanation = when {
                 !cameraGranted && !audioGranted -> "يتطلب بدء البث المباشر منح إذن الكاميرا والميكروفون لبث الفيديو والصوت للمشاهدين."
@@ -218,7 +231,7 @@ fun LiveStreamBrowseList(
         val cameraGranted = ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
         val audioGranted = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
         if (cameraGranted && audioGranted) {
-            viewModel.startUserLiveStream()
+            showStartBroadcastDialog = true
         } else {
             broadcastPermissionLauncher.launch(
                 arrayOf(
@@ -229,7 +242,11 @@ fun LiveStreamBrowseList(
         }
     }
 
-    val allStreams = viewModel.getLiveStreams()
+    LaunchedEffect(Unit) {
+        viewModel.refreshLiveStreams()
+    }
+
+    val allStreams by viewModel.liveStreams.collectAsStateWithLifecycle()
     val filteredStreams = remember(allStreams, selectedCategoryId) {
         if (selectedCategoryId == "ALL" || selectedCategoryId == "الكل") {
             allStreams
@@ -247,7 +264,7 @@ fun LiveStreamBrowseList(
 
     LaunchedEffect(selectedCategoryId) {
         isCategoryLoading = true
-        delay(220)
+        delay(180)
         isCategoryLoading = false
     }
 
@@ -339,6 +356,44 @@ fun LiveStreamBrowseList(
                     itemCount = 6,
                     modifier = Modifier.fillMaxSize()
                 )
+            } else if (allStreams.isEmpty()) {
+                // Honest empty server state when no active broadcasts are running
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(top = 40.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center
+                ) {
+                    Text(text = "🎥", fontSize = 44.sp)
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text(
+                        text = "لا توجد بثوث مباشرة نشطة الآن",
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = "كن أول من يفتح غرفة بث مباشر بالصوت والصورة عبر LiveKit الآن!",
+                        fontSize = 12.sp,
+                        color = Color(0xFF94A3B8)
+                    )
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Button(
+                            onClick = onStartBroadcastClick,
+                            colors = ButtonDefaults.buttonColors(containerColor = AyerPrimary),
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.testTag("empty_start_live_button")
+                        ) {
+                            Text("ابدأ بثك الآن 🔴", color = Color.White, fontWeight = FontWeight.Bold)
+                        }
+                        TextButton(onClick = { viewModel.refreshLiveStreams() }) {
+                            Text("تحديث", color = AyerCyan, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
             } else if (filteredStreams.isEmpty()) {
                 // Empty Category Fallback
                 Column(
@@ -456,6 +511,61 @@ fun LiveStreamBrowseList(
                 containerColor = AyerSurfaceElevated
             )
         }
+
+        // Launch Broadcast Config Dialog
+        if (showStartBroadcastDialog) {
+            AlertDialog(
+                onDismissRequest = { showStartBroadcastDialog = false },
+                title = {
+                    Text("إعداد البث المباشر 🔴", fontWeight = FontWeight.Bold, color = Color.White)
+                },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        OutlinedTextField(
+                            value = broadcastTitle,
+                            onValueChange = { broadcastTitle = it },
+                            label = { Text("عنوان البث") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth().testTag("broadcast_title_input")
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            listOf("تعارف وسوالف", "موسيقى", "ألعاب", "تحديات").forEach { cat ->
+                                FilterChip(
+                                    selected = broadcastCategory == cat,
+                                    onClick = { broadcastCategory = cat },
+                                    label = { Text(cat, fontSize = 10.sp) },
+                                    colors = FilterChipDefaults.filterChipColors(
+                                        selectedContainerColor = AyerPrimary,
+                                        selectedLabelColor = Color.White
+                                    )
+                                )
+                            }
+                        }
+                    }
+                },
+                confirmButton = {
+                    Button(
+                        onClick = {
+                            showStartBroadcastDialog = false
+                            viewModel.startUserLiveStream(
+                                title = broadcastTitle.ifBlank { "بثي المباشر" },
+                                category = broadcastCategory
+                            )
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = AyerPrimary),
+                        modifier = Modifier.testTag("confirm_start_broadcast_button")
+                    ) {
+                        Text("بدء البث الآن", color = Color.White, fontWeight = FontWeight.Bold)
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showStartBroadcastDialog = false }) {
+                        Text("إلغاء", color = Color.Gray)
+                    }
+                },
+                containerColor = AyerSurfaceElevated
+            )
+        }
     }
 }
 
@@ -488,6 +598,13 @@ fun LiveRoomViewer(
     restrictedKeywords: Set<String> = emptySet(),
     activeViewers: List<String> = emptyList(),
     isFlagged: Boolean = false,
+    isHost: Boolean = false,
+    localVideoTrack: io.livekit.android.room.track.VideoTrack? = null,
+    remoteVideoTrack: io.livekit.android.room.track.VideoTrack? = null,
+    liveKitEngine: com.example.calls.CallLiveKitEngine? = null,
+    onToggleMute: (Boolean) -> Unit = {},
+    onToggleVideo: (Boolean) -> Unit = {},
+    onSwitchCamera: (Boolean) -> Unit = {},
     onSubmitReport: (reason: String, details: String) -> Unit = { _, _ -> },
     onBlockUser: (String) -> Unit = {},
     onUnblockUser: (String) -> Unit = {},
@@ -506,7 +623,7 @@ fun LiveRoomViewer(
     var showEmojiSheet by remember { mutableStateOf(false) }
     var showModerationSheet by remember { mutableStateOf(false) }
     var showReportDialog by remember { mutableStateOf(false) }
-    var likeCounter by remember { mutableStateOf(1280) }
+    var likeCounter by remember { mutableStateOf(0) }
 
     // Floating reaction animations state
     var floatingReactions by remember { mutableStateOf<List<FloatingReactionItem>>(emptyList()) }
@@ -528,19 +645,41 @@ fun LiveRoomViewer(
     var isMuted by remember { mutableStateOf(false) }
     var isFrontCamera by remember { mutableStateOf(true) }
 
+    val activeVideoTrack = if (isHost) localVideoTrack ?: remoteVideoTrack else remoteVideoTrack ?: localVideoTrack
+
     Box(modifier = Modifier.fillMaxSize()) {
-        // Video Broadcast Background with Front Camera Mirroring
-        Box(modifier = Modifier.fillMaxSize()) {
-            Image(
-                painter = painterResource(id = stream.imageResId ?: R.drawable.stream_hero_bg),
-                contentDescription = "بث المضيف",
-                modifier = Modifier
-                    .fillMaxSize()
-                    .graphicsLayer(
-                        scaleX = if (isFrontCamera) -1f else 1f // Mirror camera if front-facing
-                    ),
-                contentScale = ContentScale.Crop
-            )
+        // Real LiveKit Broadcast Video Canvas
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(
+                    Brush.radialGradient(
+                        listOf(Color(0xFF1F1135), Color(0xFF0A0614))
+                    )
+                )
+        ) {
+            if (activeVideoTrack != null && liveKitEngine != null && isStreaming) {
+                LiveKitVideoRenderer(
+                    videoTrack = activeVideoTrack,
+                    engine = liveKitEngine,
+                    modifier = Modifier.fillMaxSize(),
+                    isMirror = isHost && isFrontCamera
+                )
+            } else if (isStreaming) {
+                Column(
+                    modifier = Modifier.align(Alignment.Center),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text(text = "📡", fontSize = 44.sp)
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Text(
+                        text = if (isHost) "جارٍ تشغيل بث الكاميرا عبر LiveKit..." else "جارٍ الاتصال ببث ${stream.hostName} المباشر...",
+                        color = Color.White,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+            }
 
             // Paused / Stopped Stream Overlay
             if (!isStreaming) {
@@ -879,7 +1018,10 @@ fun LiveRoomViewer(
                 ) {
                     // 1. Flip Camera Button (switch_camera_button / camera_switch_button)
                     IconButton(
-                        onClick = { isFrontCamera = !isFrontCamera },
+                        onClick = {
+                            isFrontCamera = !isFrontCamera
+                            onSwitchCamera(isFrontCamera)
+                        },
                         modifier = Modifier
                             .size(40.dp)
                             .background(Color.White.copy(alpha = 0.15f), CircleShape)
@@ -897,7 +1039,10 @@ fun LiveRoomViewer(
 
                     // 2. Mute / Unmute Button
                     IconButton(
-                        onClick = { isMuted = !isMuted },
+                        onClick = {
+                            isMuted = !isMuted
+                            onToggleMute(isMuted)
+                        },
                         modifier = Modifier
                             .size(40.dp)
                             .background(
@@ -916,7 +1061,10 @@ fun LiveRoomViewer(
 
                     // 3. Start Stream Button
                     Button(
-                        onClick = { isStreaming = true },
+                        onClick = {
+                            isStreaming = true
+                            onToggleVideo(true)
+                        },
                         colors = ButtonDefaults.buttonColors(
                             containerColor = if (!isStreaming) Color(0xFF00E676) else Color.White.copy(alpha = 0.12f)
                         ),
@@ -945,7 +1093,10 @@ fun LiveRoomViewer(
 
                     // 4. Stop Stream Button
                     Button(
-                        onClick = { isStreaming = false },
+                        onClick = {
+                            isStreaming = false
+                            onToggleVideo(false)
+                        },
                         colors = ButtonDefaults.buttonColors(
                             containerColor = if (isStreaming) Color(0xFFFF1744) else Color.White.copy(alpha = 0.12f)
                         ),
@@ -1102,12 +1253,12 @@ fun LiveRoomViewer(
                 IconButton(
                     onClick = {
                         val host = com.example.data.model.MatchCandidate(
-                            id = "host_${stream.id}",
+                            id = stream.hostUid.ifBlank { "host_${stream.id}" },
                             name = stream.hostName,
                             age = 25,
                             country = stream.hostCountry,
                             countryCode = stream.hostCountryCode,
-                            gender = "Female",
+                            gender = "ANY",
                             language = "ar",
                             bio = stream.hostBio,
                             interests = listOf(stream.category),

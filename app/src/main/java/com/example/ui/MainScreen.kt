@@ -2,6 +2,7 @@ package com.example.ui
 
 import android.Manifest
 import android.os.Build
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
@@ -63,6 +64,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -163,6 +165,7 @@ fun MainScreen(viewModel: AyerViewModel) {
 
     // Global Call & Incoming Call Layer (ensures calls launched from PrivateChatScreen or anywhere always render cleanly)
     if (showCallAdminDashboard) {
+        BackHandler { showCallAdminDashboard = false }
         CallAdminDashboardScreen(
             viewModel = viewModel,
             onDismiss = { showCallAdminDashboard = false }
@@ -171,11 +174,19 @@ fun MainScreen(viewModel: AyerViewModel) {
     }
 
     if (selectedChatFriend != null) {
+        val chatFriend = selectedChatFriend!!
+        BackHandler { selectedChatFriend = null }
+        DisposableEffect(chatFriend.id) {
+            viewModel.openPrivateChat(chatFriend.id)
+            onDispose {
+                viewModel.closePrivateChat()
+            }
+        }
         Box(modifier = Modifier.fillMaxSize()) {
             com.example.ui.screens.PrivateChatScreen(
-                friend = selectedChatFriend!!,
+                friend = chatFriend,
                 viewModel = viewModel,
-                messages = privateChatMessagesMap[selectedChatFriend!!.id] ?: emptyList(),
+                messages = privateChatMessagesMap[chatFriend.id] ?: emptyList(),
                 onBack = { selectedChatFriend = null }
             )
             activeCallSession?.let {
@@ -194,6 +205,7 @@ fun MainScreen(viewModel: AyerViewModel) {
     }
 
     if (showFriendsDialog) {
+        BackHandler { showFriendsDialog = false }
         Box(modifier = Modifier.fillMaxSize()) {
             com.example.ui.screens.FriendsScreen(
                 viewModel = viewModel,
@@ -237,14 +249,6 @@ fun MainScreen(viewModel: AyerViewModel) {
             snackbarHostState.showSnackbar(notice)
             viewModel.clearNotice()
         }
-    }
-
-    if (!isUserLoggedIn) {
-        com.example.ui.screens.LoginScreen(
-            viewModel = viewModel,
-            onLoginSuccess = { /* Automatically handled by StateFlow */ }
-        )
-        return
     }
 
     val isAgentUser = userProfile?.isAgent == true
@@ -586,9 +590,7 @@ fun MainScreen(viewModel: AyerViewModel) {
                 onDismiss = { showNotificationCenterDialog = false },
                 onMarkAsRead = { viewModel.markNotificationAsRead(it) },
                 onMarkAllAsRead = { viewModel.markAllNotificationsAsRead() },
-                onClearAll = { viewModel.clearAllNotifications() },
-                onSimulateReferral = { viewModel.triggerSampleReferralNotification() },
-                onSimulateCommissionPayout = { viewModel.triggerSampleCommissionPayout() }
+                onClearAll = { viewModel.clearAllNotifications() }
             )
         }
 

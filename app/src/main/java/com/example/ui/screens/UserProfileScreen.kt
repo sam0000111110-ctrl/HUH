@@ -53,6 +53,7 @@ import androidx.compose.material.icons.filled.AccountBalanceWallet
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Badge
+import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.Business
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.CardGiftcard
@@ -61,6 +62,7 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.DarkMode
+import androidx.compose.material.icons.filled.DeleteForever
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.EmojiEvents
 import androidx.compose.material.icons.filled.Favorite
@@ -155,6 +157,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
 import com.example.R
+import com.example.data.model.PointTransaction
 import com.example.data.model.UserProfile
 import com.example.data.model.currentAgencyLevel
 import com.example.ui.AyerViewModel
@@ -167,6 +170,9 @@ import com.example.ui.locale.AppLanguage
 import com.example.ui.locale.AppStrings
 import com.example.ui.theme.AyerCyan
 import com.example.ui.theme.HuhTheme
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -399,6 +405,8 @@ fun UserProfileScreen(
     val directMessagePermission by viewModel.directMessagePermission.collectAsStateWithLifecycle()
     val showOnlineStatus by viewModel.showOnlineStatus.collectAsStateWithLifecycle()
     val hideLocationInMatch by viewModel.hideLocationInMatch.collectAsStateWithLifecycle()
+    val transactions by viewModel.transactions.collectAsStateWithLifecycle()
+    val blockedUserIds by viewModel.blockedUserIds.collectAsStateWithLifecycle()
     val uiNotice by viewModel.uiNotice.collectAsStateWithLifecycle()
 
     val snackbarHostState = remember { SnackbarHostState() }
@@ -547,7 +555,7 @@ https://ayer.app/u/${userProfile.id}
                 AnimatedEntranceCard(index = 2) {
                     UserIdentityHeaderCard(
                         userProfile = userProfile,
-                        userEmail = viewModel.getCurrentUserEmail() ?: "sam0000111110@gmail.com",
+                        userEmail = viewModel.getCurrentUserEmail() ?: "",
                         activeSecondaryProfileName = activeSecondaryProfile?.displayName,
                         engagementState = engagementState,
                         presenceStatus = userPresenceStatus,
@@ -612,6 +620,7 @@ https://ayer.app/u/${userProfile.id}
             item {
                 AnimatedEntranceCard(index = 5) {
                     RecentActivityFeedCard(
+                        transactions = transactions,
                         onAddHighlightClick = { showNewHighlightDialog = true }
                     )
                 }
@@ -651,7 +660,7 @@ https://ayer.app/u/${userProfile.id}
                     AgencyAffiliationCard(
                         userProfile = userProfile,
                         onOpenAgencyDashboard = onOpenAgenciesScreen,
-                        onSimulatePayout = { viewModel.triggerSampleCommissionPayout() }
+                        onPayoutClick = onOpenAgenciesScreen
                     )
                 }
             }
@@ -713,21 +722,25 @@ https://ayer.app/u/${userProfile.id}
                         appLanguage = appLanguage,
                         onOpenLanguageSelection = { showLanguageBottomSheet = true },
                         onCreateSecondaryProfile = onOpenCreateSecondaryProfileDialog,
-                        onLogout = { viewModel.logoutUser() }
+                        blockedUserIds = blockedUserIds,
+                        onUnblockUser = { viewModel.unblockUser(it) },
+                        onLogout = { viewModel.logoutUser() },
+                        onDeleteAccount = { viewModel.deleteAccountPermanently() }
                     )
                 }
             }
         }
 
         if (showReportUserBottomSheet) {
+            val reportTargetUid = userProfile.uid.ifBlank { "AYER-${userProfile.id * 8921 + 1000}" }
             ReportUserBottomSheet(
-                targetUserId = "AYER-${userProfile.id * 8921 + 1000}",
+                targetUserId = reportTargetUid,
                 targetUserName = userProfile.name,
                 onDismiss = { showReportUserBottomSheet = false },
                 onSubmitReport = { reason, details ->
                     showReportUserBottomSheet = false
                     viewModel.submitUserReport(
-                        targetUserId = "AYER-${userProfile.id * 8921 + 1000}",
+                        targetUserId = reportTargetUid,
                         targetUserName = userProfile.name,
                         reason = reason,
                         details = details
@@ -2854,7 +2867,7 @@ fun UserActivityStatisticsCard(
 fun AgencyAffiliationCard(
     userProfile: UserProfile,
     onOpenAgencyDashboard: () -> Unit,
-    onSimulatePayout: () -> Unit,
+    onPayoutClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     Card(
@@ -3097,7 +3110,7 @@ fun AgencyAffiliationCard(
                 }
 
                 OutlinedButton(
-                    onClick = onSimulatePayout,
+                    onClick = onPayoutClick,
                     shape = RoundedCornerShape(12.dp),
                     border = BorderStroke(1.dp, Color(0xFF10B981).copy(alpha = 0.7f)),
                     modifier = Modifier
@@ -3105,7 +3118,7 @@ fun AgencyAffiliationCard(
                         .testTag("btn_agency_payout_action")
                 ) {
                     Text(
-                        text = "طلب سحب 💵",
+                        text = "الأرباح والسحب",
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Bold,
                         color = Color(0xFF10B981)
@@ -3245,13 +3258,13 @@ fun AccountSecurityCard(
 
                         Column {
                             Text(
-                                text = "المصادقة الثنائية (Two-Factor Auth)",
+                                text = "حماية الجلسة وتنبيهات تسجيل الدخول",
                                 fontSize = 13.sp,
                                 fontWeight = FontWeight.Bold,
                                 color = HuhTheme.colors.textPrimary
                             )
                             Text(
-                                text = if (isTwoFactorAuthEnabled) "مُفعلة: تأكيد الدخول برمز أمان إضافي" else "معطلة: تفعيل حماية إضافية للحساب",
+                                text = if (isTwoFactorAuthEnabled) "مُفعلة: حماية Google Sign-In + تنبيهات الأمان" else "معطلة: تفعيل تنبيهات التحقق الأمني للجلسة",
                                 fontSize = 11.sp,
                                 color = if (isTwoFactorAuthEnabled) Color(0xFF10B981) else HuhTheme.colors.textTertiary
                             )
@@ -3387,9 +3400,15 @@ fun AccountPreferencesCard(
     appLanguage: AppLanguage,
     onOpenLanguageSelection: () -> Unit,
     onCreateSecondaryProfile: () -> Unit,
+    blockedUserIds: Set<String> = emptySet(),
+    onUnblockUser: (String) -> Unit = {},
     onLogout: () -> Unit,
+    onDeleteAccount: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
+    var showBlockedUsersDialog by remember { mutableStateOf(false) }
+    var showDeleteConfirmDialog by remember { mutableStateOf(false) }
+
     Card(
         modifier = modifier
             .fillMaxWidth()
@@ -3524,6 +3543,49 @@ fun AccountPreferencesCard(
 
             HorizontalDivider(color = HuhTheme.colors.surfaceVariant)
 
+            // Blocked Users Management Row
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .clickable { showBlockedUsersDialog = true }
+                    .padding(vertical = 12.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Default.Block,
+                        contentDescription = null,
+                        tint = HuhTheme.colors.error,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Column {
+                        Text(
+                            text = "المستخدمون المحظورون (${blockedUserIds.size})",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = HuhTheme.colors.textPrimary
+                        )
+                        Text(
+                            text = "إدارة قائمة الحظر وإلغاء الحظر في أي وقت",
+                            fontSize = 11.sp,
+                            color = HuhTheme.colors.textSecondary
+                        )
+                    }
+                }
+
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.ArrowForwardIos,
+                    contentDescription = null,
+                    tint = HuhTheme.colors.textTertiary,
+                    modifier = Modifier.size(14.dp)
+                )
+            }
+
+            HorizontalDivider(color = HuhTheme.colors.surfaceVariant)
+
             Spacer(modifier = Modifier.height(12.dp))
 
             // Logout Button
@@ -3550,7 +3612,113 @@ fun AccountPreferencesCard(
                     color = Color(0xFFFF4D6D)
                 )
             }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // Permanent Account Deletion (Google Play Policy requirement)
+            TextButton(
+                onClick = { showDeleteConfirmDialog = true },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("btn_delete_account_action")
+            ) {
+                Icon(
+                    imageVector = Icons.Default.DeleteForever,
+                    contentDescription = null,
+                    tint = Color(0xFFEF4444),
+                    modifier = Modifier.size(16.dp)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = "حذف الحساب وجميع البيانات نهائياً",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = Color(0xFFEF4444)
+                )
+            }
         }
+    }
+
+    if (showBlockedUsersDialog) {
+        AlertDialog(
+            onDismissRequest = { showBlockedUsersDialog = false },
+            title = { Text("المستخدمون المحظورون", color = HuhTheme.colors.textPrimary) },
+            text = {
+                if (blockedUserIds.isEmpty()) {
+                    Text(
+                        text = "قائمة الحظر فارغة حالياً.",
+                        color = HuhTheme.colors.textSecondary,
+                        fontSize = 13.sp
+                    )
+                } else {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        blockedUserIds.forEach { blockedId ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(HuhTheme.colors.surfaceVariant, RoundedCornerShape(10.dp))
+                                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = blockedId.take(18),
+                                    color = HuhTheme.colors.textPrimary,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Medium
+                                )
+                                TextButton(onClick = { onUnblockUser(blockedId) }) {
+                                    Text("إلغاء الحظر", color = HuhTheme.colors.primary, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showBlockedUsersDialog = false }) {
+                    Text("إغلاق", color = HuhTheme.colors.primary)
+                }
+            },
+            containerColor = HuhTheme.colors.surface
+        )
+    }
+
+    if (showDeleteConfirmDialog) {
+        AlertDialog(
+            onDismissRequest = { showDeleteConfirmDialog = false },
+            title = {
+                Text(
+                    text = "تأكيد حذف الحساب نهائياً",
+                    color = Color(0xFFEF4444),
+                    fontWeight = FontWeight.Bold
+                )
+            },
+            text = {
+                Text(
+                    text = "سيتم حذف ملفك الشخصي ورسائلك وصلاحية الدخول نهائياً ولا يمكن التراجع عن هذا الإجراء. هل تريد المتابعة؟",
+                    color = HuhTheme.colors.textSecondary,
+                    fontSize = 13.sp
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showDeleteConfirmDialog = false
+                        onDeleteAccount()
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFEF4444))
+                ) {
+                    Text("نعم، احذف نهائياً", color = Color.White, fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeleteConfirmDialog = false }) {
+                    Text("إلغاء", color = HuhTheme.colors.textPrimary)
+                }
+            },
+            containerColor = HuhTheme.colors.surface
+        )
     }
 }
 
@@ -4461,65 +4629,36 @@ fun MilestoneDetailDialog(
  */
 @Composable
 fun RecentActivityFeedCard(
+    transactions: List<PointTransaction> = emptyList(),
     onAddHighlightClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
-    val activities = remember {
-        listOf(
+    val dateFormatter = remember { SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()) }
+    val activities = remember(transactions) {
+        transactions.take(5).map { tx ->
+            val (tag, icon, color) = when (tx.type) {
+                "PURCHASE" -> Triple("#شحن_نقاط", Icons.Default.AccountBalanceWallet, Color(0xFF10B981))
+                "GIFT_SENT" -> Triple("#هدية_مرسلة", Icons.Default.CardGiftcard, Color(0xFFFF2A85))
+                "AGENT_COMMISSION", "GIFT_RECEIVE" -> Triple("#أرباح_ووكالات", Icons.Default.WorkspacePremium, Color(0xFFFBBF24))
+                "DAILY_FREE" -> Triple("#مكافأة_يومية", Icons.Default.Star, Color(0xFF38BDF8))
+                "MATCH_SPEND", "CALL_SPEND" -> Triple("#مطابقة_ومكالمات", Icons.Default.Public, Color(0xFFA855F7))
+                else -> Triple("#سجل_العمليات", Icons.Default.MonetizationOn, Color(0xFF10B981))
+            }
             RecentActivityItem(
-                id = "act_1",
-                title = "🔴 بث مباشر استثنائي: سهرة الأصدقاء والمطابقة",
-                subtitle = "استمر البث ساعتين و14 دقيقة بمشاركة 1,420 مشاهد من 8 دول",
-                timestamp = "منذ ساعتين",
-                viewsCount = 1420,
-                likesCount = 248,
-                pointsEarned = 350,
-                tag = "#بث_مباشر",
-                isHighlight = true,
-                icon = Icons.Default.LiveTv,
-                accentColor = Color(0xFFFF2A85)
-            ),
-            RecentActivityItem(
-                id = "act_2",
-                title = "🏆 ترقية رسمية: الانضمام لنخبة مضيفي الوكالة",
-                subtitle = "ترقية إلى رتبة Gold Host مع زيادة نسبة العمولة إلى 60%",
-                timestamp = "منذ يومين",
-                viewsCount = 850,
-                likesCount = 192,
-                pointsEarned = null,
-                tag = "#إنجاز_الوكالة",
-                isHighlight = false,
-                icon = Icons.Default.WorkspacePremium,
-                accentColor = Color(0xFFFBBF24)
-            ),
-            RecentActivityItem(
-                id = "act_3",
-                title = "🌐 مطابقة عشوائية دولية مميزة مع روما 🇮🇹",
-                subtitle = "محادثة فيديو ممتعة استمرت 24 دقيقة وتبادل هدايا الصداقة",
-                timestamp = "منذ 3 أيام",
-                viewsCount = 520,
-                likesCount = 112,
-                pointsEarned = 100,
-                tag = "#تواصل_عالمي",
-                isHighlight = false,
-                icon = Icons.Default.Public,
-                accentColor = Color(0xFF38BDF8)
-            ),
-            RecentActivityItem(
-                id = "act_4",
-                title = "💎 استلام درع الألماس الملكي VIP",
-                subtitle = "هدية حصرية كبرى من أحد كبار الداعمين في غرفة البث الحية",
-                timestamp = "منذ 5 أيام",
-                viewsCount = 1890,
-                likesCount = 310,
-                pointsEarned = 5000,
-                tag = "#هدايا_VIP",
-                isHighlight = true,
-                icon = Icons.Default.CardGiftcard,
-                accentColor = Color(0xFFA855F7)
+                id = "tx_${tx.id}",
+                title = tx.description,
+                subtitle = "المبلغ: ${tx.amount} نقطة • الرصيد بعد العملية موثق في السجل",
+                timestamp = dateFormatter.format(Date(tx.timestamp)),
+                viewsCount = 0,
+                likesCount = 0,
+                pointsEarned = if (tx.amount > 0) tx.amount else null,
+                tag = tag,
+                isHighlight = tx.type == "AGENT_COMMISSION" || tx.type == "GIFT_RECEIVE",
+                icon = icon,
+                accentColor = color
             )
-        )
+        }
     }
 
     Card(
@@ -4558,13 +4697,13 @@ fun RecentActivityFeedCard(
                     Spacer(modifier = Modifier.width(10.dp))
                     Column {
                         Text(
-                            text = "النشاط الأخير والهايلايتس",
+                            text = "النشاط الأخير والعمليات",
                             fontSize = 15.sp,
                             fontWeight = FontWeight.Bold,
                             color = HuhTheme.colors.textPrimary
                         )
                         Text(
-                            text = "أحدث المنشورات والبثوث المباشرة وإنجازاتك",
+                            text = "أحدث الأنشطة الفعلية المسجلة على حسابك",
                             fontSize = 11.sp,
                             color = HuhTheme.colors.textTertiary
                         )
@@ -4604,20 +4743,35 @@ fun RecentActivityFeedCard(
 
             Spacer(modifier = Modifier.height(14.dp))
 
-            // Vertical list of activity items
+            // Vertical list of real activity items
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
                     .testTag("recent_activity_vertical_list"),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                activities.forEach { activity ->
-                    RecentActivityRowItem(
-                        activity = activity,
-                        onLikeClick = {
-                            Toast.makeText(context, "تم تسجيل إعجابك بالمنشور ❤️", Toast.LENGTH_SHORT).show()
-                        }
-                    )
+                if (activities.isEmpty()) {
+                    Surface(
+                        shape = RoundedCornerShape(14.dp),
+                        color = HuhTheme.colors.surfaceVariant.copy(alpha = 0.4f),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = "لا توجد أنشطة مسجلة حتى الآن. ستظهر هنا عملياتك وبثوثك الحقيقية فور بدئها.",
+                            fontSize = 12.sp,
+                            color = HuhTheme.colors.textSecondary,
+                            modifier = Modifier.padding(14.dp)
+                        )
+                    }
+                } else {
+                    activities.forEach { activity ->
+                        RecentActivityRowItem(
+                            activity = activity,
+                            onLikeClick = {
+                                Toast.makeText(context, "تم تسجيل تفاعلك مع السجل", Toast.LENGTH_SHORT).show()
+                            }
+                        )
+                    }
                 }
             }
         }

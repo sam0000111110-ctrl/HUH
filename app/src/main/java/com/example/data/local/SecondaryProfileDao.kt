@@ -16,8 +16,8 @@ interface SecondaryProfileDao {
     @Query("SELECT * FROM secondary_profiles WHERE parentUserId = :parentUserId ORDER BY createdAt DESC")
     fun getProfilesForParent(parentUserId: Long): Flow<List<SecondaryProfile>>
 
-    @Query("SELECT * FROM secondary_profiles WHERE parentUserId = :parentUserId AND passwordHash = :password LIMIT 1")
-    suspend fun findMatchingProfileByPassword(parentUserId: Long, password: String): SecondaryProfile?
+    @Query("SELECT * FROM secondary_profiles WHERE parentUserId = :parentUserId ORDER BY createdAt DESC")
+    suspend fun getAllProfilesForParentSync(parentUserId: Long): List<SecondaryProfile>
 
     @Query("SELECT * FROM secondary_profiles WHERE username = :username LIMIT 1")
     suspend fun findByUsername(username: String): SecondaryProfile?
@@ -30,6 +30,9 @@ interface SecondaryProfileDao {
 
     @Query("DELETE FROM secondary_profiles WHERE id = :id")
     suspend fun deleteProfile(id: Long)
+
+    @Query("DELETE FROM secondary_profiles")
+    suspend fun clearAll()
 
     @Query("SELECT COUNT(*) FROM secondary_profiles WHERE parentUserId = :parentUserId")
     suspend fun countProfiles(parentUserId: Long): Int

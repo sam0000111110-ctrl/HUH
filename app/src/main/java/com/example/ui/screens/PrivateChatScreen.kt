@@ -1,12 +1,18 @@
 package com.example.ui.screens
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.widget.Toast
+import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -28,7 +34,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.CallMissed
@@ -43,19 +49,18 @@ import androidx.compose.material.icons.filled.PhoneCallback
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Report
 import androidx.compose.material.icons.filled.Send
+import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.Translate
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
-import com.example.ui.components.SmoothDropdownMenu
-import com.example.ui.components.SmoothDropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
@@ -65,9 +70,11 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -79,21 +86,26 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import kotlinx.coroutines.launch
-import com.example.R
+import androidx.core.content.ContextCompat
+import coil.compose.AsyncImage
 import com.example.data.model.FriendItem
 import com.example.data.model.PrivateChatMessage
 import com.example.ui.AyerViewModel
+import com.example.ui.components.SmoothDropdownMenu
+import com.example.ui.components.SmoothDropdownMenuItem
 import com.example.ui.theme.AyerCyan
 import com.example.ui.theme.AyerGold
 import com.example.ui.theme.AyerPrimary
-import com.example.ui.theme.AyerSecondary
 import com.example.ui.theme.HuhTheme
+import com.example.util.VoiceAudioHelper
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -103,20 +115,61 @@ fun PrivateChatScreen(
     messages: List<PrivateChatMessage>,
     onBack: () -> Unit
 ) {
+    BackHandler(onBack = onBack)
+
     val isDark = HuhTheme.colors.isDark
     var textInput by remember { mutableStateOf("") }
     var selectedTextColor by remember { mutableStateOf(if (isDark) "#FFFFFF" else "#0F172A") }
     var selectedBgColor by remember { mutableStateOf(if (isDark) "#1E1B2E" else "#F1F5F9") }
-    var chatWallpaperColor by remember(isDark) { 
-        mutableStateOf(if (isDark) Color(0xFF07040E) else Color(0xFFF8FAFC)) 
+    var chatWallpaperColor by remember(isDark) {
+        mutableStateOf(if (isDark) Color(0xFF07040E) else Color(0xFFF8FAFC))
     }
     var showWallpaperDialog by remember { mutableStateOf(false) }
     var showMediaSendDialog by remember { mutableStateOf(false) }
     var showOptionsMenu by remember { mutableStateOf(false) }
+    var showReportBottomSheet by remember { mutableStateOf(false) }
     var isRecordingVoice by remember { mutableStateOf(false) }
+    var recordingSeconds by remember { mutableIntStateOf(0) }
+    var playingVoiceMsgId by remember { mutableStateOf<String?>(null) }
 
+    val context = LocalContext.current
+    val voiceHelper = remember(context) { VoiceAudioHelper(context) }
+
+    val recordAudioLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            voiceHelper.startRecording()
+                .onSuccess { isRecordingVoice = true }
+                .onFailure { err ->
+                    Toast.makeText(context, err.message ?: "تعذر بدء التسجيل الصوتي", Toast.LENGTH_SHORT).show()
+                }
+        } else {
+            Toast.makeText(context, "يرجى منح صلاحية الميكروفون لإرسال رسالة صوتية", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    LaunchedEffect(isRecordingVoice) {
+        if (isRecordingVoice) {
+            recordingSeconds = 0
+            while (isRecordingVoice) {
+                delay(1000L)
+                recordingSeconds += 1
+            }
+        }
+    }
+
+    DisposableEffect(Unit) {
+        val activity = com.example.util.SecurityUtils.findActivity(context)
+        com.example.util.SecurityUtils.setScreenCaptureProtection(activity, true)
+        onDispose {
+            com.example.util.SecurityUtils.setScreenCaptureProtection(activity, false)
+            voiceHelper.release()
+        }
+    }
     val listState = rememberLazyListState()
     val coroutineScope = rememberCoroutineScope()
+    val currentUserUid = remember(viewModel) { viewModel.currentUserUid() }
 
     // Derived state: tracks whether the user has scrolled up away from the bottom
     val isScrolledUp by remember {
@@ -132,7 +185,6 @@ fun PrivateChatScreen(
     }
 
     // Auto-scroll feature: keeps the latest messages in view
-    // Automatically scrolls to the bottom on first load and when new messages arrive (unless user is reading history scrolled up)
     var isFirstLoad by remember { mutableStateOf(true) }
     LaunchedEffect(messages.size) {
         if (messages.isNotEmpty()) {
@@ -175,7 +227,7 @@ fun PrivateChatScreen(
                                 fontSize = 15.sp
                             )
                             Text(
-                                text = if (friend.isOnline) "🟢 متصل الآن • P2P عالي الجودة" else "⚪ غائب",
+                                text = if (friend.isOnline) "🟢 متصل الآن • محادثة مشفرة" else "⚪ غير متصل",
                                 color = HuhTheme.colors.tertiary,
                                 fontSize = 11.sp
                             )
@@ -185,7 +237,7 @@ fun PrivateChatScreen(
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(
-                            imageVector = Icons.Default.ArrowBack,
+                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
                             contentDescription = "رجوع",
                             tint = HuhTheme.colors.textPrimary
                         )
@@ -247,7 +299,7 @@ fun PrivateChatScreen(
                             leadingIcon = { Icon(Icons.Default.Report, null, tint = Color(0xFFFACC15), modifier = Modifier.size(18.dp)) },
                             onClick = {
                                 showOptionsMenu = false
-                                viewModel.reportFriend(friend.id)
+                                showReportBottomSheet = true
                             }
                         )
                         SmoothDropdownMenuItem(
@@ -296,7 +348,7 @@ fun PrivateChatScreen(
                         .testTag("chat_messages_list"),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    items(messages) { msg ->
+                    items(messages, key = { it.id }) { msg ->
                         if (msg.callLogRecordId != null) {
                             PrivateChatCallLogCard(
                                 message = msg,
@@ -307,6 +359,27 @@ fun PrivateChatScreen(
                         } else {
                             ChatMessageBubble(
                                 message = msg,
+                                currentUserUid = currentUserUid,
+                                isPlayingVoice = playingVoiceMsgId == msg.id,
+                                onToggleVoicePlay = {
+                                    voiceHelper.togglePlayback(
+                                        messageId = msg.id,
+                                        filePath = msg.voiceFilePath,
+                                        base64Audio = msg.voiceAudioBase64,
+                                        onPlaybackStarted = { playingVoiceMsgId = msg.id },
+                                        onPlaybackStopped = {
+                                            if (playingVoiceMsgId == msg.id) {
+                                                playingVoiceMsgId = null
+                                            }
+                                        },
+                                        onError = { errMsg ->
+                                            Toast.makeText(context, errMsg, Toast.LENGTH_SHORT).show()
+                                        }
+                                    )
+                                },
+                                onTranslate = { textToTranslate ->
+                                    viewModel.translatePrivateMessage(friend.id, msg.id, textToTranslate)
+                                },
                                 onUnlock = { price ->
                                     viewModel.unlockMediaMessage(friend.id, msg.id, price)
                                 }
@@ -331,7 +404,7 @@ fun PrivateChatScreen(
                 )
             }
 
-            // Recording voice indicator if active
+            // Hardware Voice Recording indicator if active
             if (isRecordingVoice) {
                 Surface(
                     modifier = Modifier.fillMaxWidth(),
@@ -345,16 +418,41 @@ fun PrivateChatScreen(
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Icon(Icons.Default.Mic, null, tint = HuhTheme.colors.error)
                             Spacer(modifier = Modifier.width(8.dp))
-                            Text("جارٍ تسجيل الصوت (0:04)...", color = HuhTheme.colors.textPrimary, fontWeight = FontWeight.Bold)
+                            Text(
+                                text = String.format("جارٍ التسجيل (%d:%02d)...", recordingSeconds / 60, recordingSeconds % 60),
+                                color = HuhTheme.colors.textPrimary,
+                                fontWeight = FontWeight.Bold
+                            )
                         }
-                        Button(
-                            onClick = {
-                                isRecordingVoice = false
-                                viewModel.sendVoiceMessage(friend.id, 4)
-                            },
-                            colors = ButtonDefaults.buttonColors(containerColor = HuhTheme.colors.success)
-                        ) {
-                            Text("إرسال", color = Color.White)
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            TextButton(
+                                onClick = {
+                                    voiceHelper.cancelRecording()
+                                    isRecordingVoice = false
+                                }
+                            ) {
+                                Text("إلغاء", color = HuhTheme.colors.error)
+                            }
+                            Button(
+                                onClick = {
+                                    isRecordingVoice = false
+                                    voiceHelper.stopRecordingAndSave()
+                                        .onSuccess { clip ->
+                                            viewModel.sendVoiceMessage(
+                                                friendId = friend.id,
+                                                durationSec = clip.durationSeconds,
+                                                voiceFilePath = clip.filePath,
+                                                voiceAudioBase64 = clip.base64Audio
+                                            )
+                                        }
+                                        .onFailure { err ->
+                                            Toast.makeText(context, err.message ?: "تعذر حفظ المقطع الصوتي", Toast.LENGTH_SHORT).show()
+                                        }
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = HuhTheme.colors.success)
+                            ) {
+                                Text("إرسال", color = Color.White)
+                            }
                         }
                     }
                 }
@@ -435,9 +533,25 @@ fun PrivateChatScreen(
 
                         Spacer(modifier = Modifier.width(4.dp))
 
-                        // Voice Message Button
+                        // Voice Message Button (Hardware Microphone)
                         IconButton(
-                            onClick = { isRecordingVoice = true },
+                            onClick = {
+                                if (!isRecordingVoice) {
+                                    val granted = ContextCompat.checkSelfPermission(
+                                        context,
+                                        Manifest.permission.RECORD_AUDIO
+                                    ) == PackageManager.PERMISSION_GRANTED
+                                    if (granted) {
+                                        voiceHelper.startRecording()
+                                            .onSuccess { isRecordingVoice = true }
+                                            .onFailure { err ->
+                                                Toast.makeText(context, err.message ?: "تعذر بدء التسجيل الصوتي", Toast.LENGTH_SHORT).show()
+                                            }
+                                    } else {
+                                        recordAudioLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                    }
+                                }
+                            },
                             modifier = Modifier
                                 .size(40.dp)
                                 .background(HuhTheme.colors.tertiary.copy(alpha = 0.15f), CircleShape)
@@ -481,7 +595,7 @@ fun PrivateChatScreen(
                                         bgColor = selectedBgColor
                                     )
                                     coroutineScope.launch {
-                                        kotlinx.coroutines.delay(60)
+                                        delay(60)
                                         if (messages.isNotEmpty()) {
                                             listState.animateScrollToItem(messages.size - 1)
                                         }
@@ -511,9 +625,30 @@ fun PrivateChatScreen(
     if (showMediaSendDialog) {
         SendPaidMediaDialog(
             onDismiss = { showMediaSendDialog = false },
-            onSend = { price ->
-                viewModel.sendPrivateMediaMessage(friend.id, R.drawable.ic_ayer_logo, price)
+            onSend = { mediaUri, price ->
+                viewModel.sendPrivateMediaMessage(
+                    friendId = friend.id,
+                    mediaUri = mediaUri,
+                    priceCoins = price
+                )
                 showMediaSendDialog = false
+            }
+        )
+    }
+
+    if (showReportBottomSheet) {
+        ReportUserBottomSheet(
+            targetUserId = friend.id,
+            targetUserName = friend.name,
+            onDismiss = { showReportBottomSheet = false },
+            onSubmitReport = { reason, details ->
+                showReportBottomSheet = false
+                viewModel.submitUserReport(
+                    targetUserId = friend.id,
+                    targetUserName = friend.name,
+                    reason = reason,
+                    details = details
+                )
             }
         )
     }
@@ -561,22 +696,26 @@ fun PrivateChatScreen(
 @Composable
 fun ChatMessageBubble(
     message: PrivateChatMessage,
+    currentUserUid: String = "",
+    isPlayingVoice: Boolean = false,
+    onToggleVoicePlay: () -> Unit = {},
+    onTranslate: (String) -> Unit = {},
     onUnlock: (Int) -> Unit
 ) {
-    @Suppress("UNUSED_VARIABLE")
-    val isMe = message.senderId == "me"
+    val isMe = message.senderId == "me" ||
+        (currentUserUid.isNotBlank() && message.senderId == currentUserUid)
 
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = if (isMe) Arrangement.End else Arrangement.Start
     ) {
         Card(
-            modifier = Modifier.width(270.dp),
+            modifier = Modifier.width(275.dp),
             shape = RoundedCornerShape(16.dp),
             colors = CardDefaults.cardColors(
                 containerColor = try {
                     Color(android.graphics.Color.parseColor(message.bgColorHex))
-                } catch (e: Exception) {
+                } catch (_: Exception) {
                     Color(0xFF1E1B2E)
                 }
             )
@@ -590,22 +729,26 @@ fun ChatMessageBubble(
                         horizontalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
                         IconButton(
-                            onClick = {},
+                            onClick = onToggleVoicePlay,
                             modifier = Modifier
-                                .size(36.dp)
+                                .size(38.dp)
                                 .background(AyerCyan, CircleShape)
                         ) {
-                            Icon(Icons.Default.PlayArrow, "تشغيل", tint = Color.Black)
+                            Icon(
+                                imageVector = if (isPlayingVoice) Icons.Default.Stop else Icons.Default.PlayArrow,
+                                contentDescription = if (isPlayingVoice) "إيقاف" else "تشغيل",
+                                tint = Color.Black
+                            )
                         }
                         Column {
                             Text(
-                                text = "🎤 رسالة صوتية مشفرة P2P",
+                                text = "🎤 رسالة صوتية (AAC)",
                                 color = Color.White,
                                 fontWeight = FontWeight.Bold,
                                 fontSize = 13.sp
                             )
                             Text(
-                                text = "المدة: ${message.voiceDurationSeconds} ثانية",
+                                text = if (isPlayingVoice) "جارٍ التشغيل..." else "المدة: ${message.voiceDurationSeconds} ثانية",
                                 color = AyerCyan,
                                 fontSize = 11.sp
                             )
@@ -616,15 +759,66 @@ fun ChatMessageBubble(
                         text = message.text,
                         color = try {
                             Color(android.graphics.Color.parseColor(message.textColorHex))
-                        } catch (e: Exception) {
+                        } catch (_: Exception) {
                             Color.White
                         },
                         fontSize = 15.sp,
                         fontWeight = FontWeight.Medium
                     )
+
+                    if (!message.translatedText.isNullOrBlank()) {
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            color = Color.Black.copy(alpha = 0.28f),
+                            border = BorderStroke(1.dp, AyerCyan.copy(alpha = 0.4f))
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Translate,
+                                    contentDescription = null,
+                                    tint = AyerCyan,
+                                    modifier = Modifier.size(13.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = message.translatedText,
+                                    color = Color(0xFFE0F7FA),
+                                    fontSize = 12.sp
+                                )
+                            }
+                        }
+                    } else {
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Row(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .clickable { onTranslate(message.text) }
+                                .padding(horizontal = 4.dp, vertical = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Translate,
+                                contentDescription = "ترجمة الرسالة بالذكاء الاصطناعي",
+                                tint = AyerCyan.copy(alpha = 0.85f),
+                                modifier = Modifier.size(13.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = "ترجمة فورية",
+                                color = AyerCyan.copy(alpha = 0.85f),
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                    }
                 }
 
-                if (message.mediaResId != null) {
+                val mediaModel: Any? = message.mediaUri?.takeIf { it.isNotBlank() } ?: message.mediaResId
+                if (mediaModel != null) {
                     Spacer(modifier = Modifier.height(6.dp))
                     Box(
                         modifier = Modifier
@@ -632,20 +826,22 @@ fun ChatMessageBubble(
                             .height(180.dp)
                             .clip(RoundedCornerShape(12.dp))
                     ) {
-                        if (message.isUnlocked) {
-                            androidx.compose.foundation.Image(
-                                painter = painterResource(id = message.mediaResId),
-                                contentDescription = "صورة مكشوفة",
-                                modifier = Modifier.fillMaxSize()
+                        if (message.isUnlocked || isMe) {
+                            AsyncImage(
+                                model = mediaModel,
+                                contentDescription = if (isMe) "صورة مرسلة" else "صورة مكشوفة",
+                                modifier = Modifier.fillMaxSize(),
+                                contentScale = ContentScale.Crop
                             )
                         } else {
                             Box(modifier = Modifier.fillMaxSize()) {
-                                androidx.compose.foundation.Image(
-                                    painter = painterResource(id = message.mediaResId),
+                                AsyncImage(
+                                    model = mediaModel,
                                     contentDescription = "صورة مغلقة",
                                     modifier = Modifier
                                         .fillMaxSize()
-                                        .blur(20.dp)
+                                        .blur(22.dp),
+                                    contentScale = ContentScale.Crop
                                 )
 
                                 var scratchProgress by remember { mutableStateOf(0f) }
@@ -703,20 +899,61 @@ fun ChatMessageBubble(
 @Composable
 fun SendPaidMediaDialog(
     onDismiss: () -> Unit,
-    onSend: (Int) -> Unit
+    onSend: (mediaUri: String, priceCoins: Int) -> Unit
 ) {
     var priceStr by remember { mutableStateOf("50") }
+    var selectedMediaUri by remember { mutableStateOf<String?>(null) }
+
+    val photoPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        selectedMediaUri = uri?.toString()
+    }
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("إرسال محتوى خاص مغلق", color = HuhTheme.colors.textPrimary) },
+        title = { Text("إرسال صورة خاصة مغلقة", color = HuhTheme.colors.textPrimary) },
         text = {
-            Column {
-                Text("حدد عدد النقاط المطلوبة لفتح الصورة من قِبل الطرف الآخر:", color = HuhTheme.colors.textSecondary, fontSize = 13.sp)
-                Spacer(modifier = Modifier.height(12.dp))
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    "اختر صورة من جهازك وحدد عدد النقاط المطلوبة لفتحها من قِبل الطرف الآخر:",
+                    color = HuhTheme.colors.textSecondary,
+                    fontSize = 13.sp
+                )
+                OutlinedButton(
+                    onClick = {
+                        photoPickerLauncher.launch(
+                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                        )
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    border = BorderStroke(1.dp, HuhTheme.colors.primary.copy(alpha = 0.6f))
+                ) {
+                    Icon(Icons.Default.Image, contentDescription = null, tint = HuhTheme.colors.primary)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = if (selectedMediaUri == null) "اختيار صورة من الاستوديو" else "تغيير الصورة المختارة",
+                        color = HuhTheme.colors.primary,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+
+                if (selectedMediaUri != null) {
+                    AsyncImage(
+                        model = selectedMediaUri,
+                        contentDescription = "معاينة الصورة",
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(120.dp)
+                            .clip(RoundedCornerShape(12.dp)),
+                        contentScale = ContentScale.Crop
+                    )
+                }
+
                 OutlinedTextField(
                     value = priceStr,
-                    onValueChange = { priceStr = it },
+                    onValueChange = { priceStr = it.filter { ch -> ch.isDigit() } },
                     label = { Text("سعر النقاط", color = HuhTheme.colors.textSecondary) },
                     shape = RoundedCornerShape(12.dp),
                     colors = OutlinedTextFieldDefaults.colors(
@@ -731,9 +968,11 @@ fun SendPaidMediaDialog(
         confirmButton = {
             Button(
                 onClick = {
-                    val p = priceStr.toIntOrNull() ?: 50
-                    onSend(p)
+                    val uri = selectedMediaUri ?: return@Button
+                    val p = (priceStr.toIntOrNull() ?: 50).coerceAtLeast(1)
+                    onSend(uri, p)
                 },
+                enabled = selectedMediaUri != null,
                 colors = ButtonDefaults.buttonColors(containerColor = HuhTheme.colors.gold)
             ) {
                 Text("إرسال الآن", color = Color.Black, fontWeight = FontWeight.Bold)

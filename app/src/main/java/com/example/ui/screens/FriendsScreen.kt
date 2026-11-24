@@ -1,7 +1,8 @@
 package com.example.ui.screens
 
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -22,21 +23,22 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Message
 import androidx.compose.material.icons.filled.PersonAdd
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.Divider
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.TabRowDefaults
 import androidx.compose.material3.TabRowDefaults.tabIndicatorOffset
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -55,12 +57,7 @@ import androidx.compose.ui.unit.sp
 import com.example.data.model.FriendItem
 import com.example.data.model.FriendshipStatus
 import com.example.ui.AyerViewModel
-import com.example.ui.theme.AyerCyan
-import com.example.ui.theme.AyerGold
-import com.example.ui.theme.AyerPrimary
-import com.example.ui.theme.AyerSecondary
 import com.example.ui.theme.HuhTheme
-import androidx.compose.foundation.BorderStroke
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -70,7 +67,9 @@ fun FriendsScreen(
     onNavigateToChat: (FriendItem) -> Unit,
     onDismiss: () -> Unit
 ) {
+    BackHandler(onBack = onDismiss)
     var selectedTab by remember { mutableStateOf(0) } // 0: Friends, 1: Requests
+    var showAddFriendDialog by remember { mutableStateOf(false) }
 
     val acceptedFriends = friends.filter { it.status == FriendshipStatus.ACCEPTED }
     val incomingRequests = friends.filter { it.status == FriendshipStatus.PENDING_INCOMING }
@@ -92,6 +91,15 @@ fun FriendsScreen(
                             imageVector = Icons.Default.Close,
                             contentDescription = "إغلاق",
                             tint = HuhTheme.colors.textPrimary
+                        )
+                    }
+                },
+                actions = {
+                    IconButton(onClick = { showAddFriendDialog = true }) {
+                        Icon(
+                            imageVector = Icons.Default.PersonAdd,
+                            contentDescription = "إضافة صديق بالمعرّف",
+                            tint = HuhTheme.colors.primary
                         )
                     }
                 },
@@ -209,6 +217,63 @@ fun FriendsScreen(
                 }
             }
         }
+    }
+
+    if (showAddFriendDialog) {
+        var targetUid by remember { mutableStateOf("") }
+        var targetName by remember { mutableStateOf("") }
+        var targetCountry by remember { mutableStateOf("العالم") }
+        AlertDialog(
+            onDismissRequest = { showAddFriendDialog = false },
+            title = { Text("إضافة صديق عبر المعرّف", color = HuhTheme.colors.textPrimary) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = targetUid,
+                        onValueChange = { targetUid = it.trim() },
+                        label = { Text("معرّف المستخدم (UID)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = targetName,
+                        onValueChange = { targetName = it },
+                        label = { Text("الاسم المعروض (اختياري)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = targetCountry,
+                        onValueChange = { targetCountry = it },
+                        label = { Text("الدولة") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        viewModel.sendFriendRequest(
+                            targetUid = targetUid,
+                            name = targetName.ifBlank { "مستخدم HUH" },
+                            country = targetCountry.ifBlank { "العالم" }
+                        )
+                        showAddFriendDialog = false
+                    },
+                    enabled = targetUid.isNotBlank(),
+                    colors = ButtonDefaults.buttonColors(containerColor = HuhTheme.colors.primary)
+                ) {
+                    Text("إرسال طلب", color = Color.White, fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showAddFriendDialog = false }) {
+                    Text("إلغاء", color = HuhTheme.colors.textSecondary)
+                }
+            },
+            containerColor = HuhTheme.colors.surface
+        )
     }
 }
 

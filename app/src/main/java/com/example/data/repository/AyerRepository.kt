@@ -1,49 +1,104 @@
 package com.example.data.repository
 
+import android.content.Context
+import com.example.BuildConfig
 import com.example.data.local.NotificationDao
 import com.example.data.local.SecondaryProfileDao
 import com.example.data.local.TransactionDao
 import com.example.data.local.UserDao
+import com.example.data.model.AgeVerificationSubmissionDoc
 import com.example.data.model.AppNotification
 import com.example.data.model.CoinPackage
 import com.example.data.model.CreatorLeaderboardItem
 import com.example.data.model.DailyMissionItem
 import com.example.data.model.FirestoreRandomChatMessage
+import com.example.data.model.FirestoreUserDoc
 import com.example.data.model.GiftItem
 import com.example.data.model.LeaderboardScope
 import com.example.data.model.LeaderboardTimeframe
 import com.example.data.model.LiveStreamReport
 import com.example.data.model.LiveStreamRoom
-import com.example.data.model.MatchCandidate
 import com.example.data.model.NotificationType
 import com.example.data.model.PointTransaction
 import com.example.data.model.SecondaryProfile
+import com.example.data.model.SubAgentItem
 import com.example.data.model.UserEngagementState
 import com.example.data.model.UserProfile
+import com.example.data.model.UserProfileReport
+import com.example.data.remote.AdminAgeVerificationItemDto
+import com.example.data.remote.AdminUpdateRolesRequestDto
+import com.example.data.remote.AuthSyncRequestDto
+import com.example.data.remote.BackendLedgerEntryDto
+import com.example.data.remote.BackendPlatformApi
+import com.example.data.remote.BackendUserDto
+import com.example.data.remote.BackendWalletDto
+import com.example.data.remote.BlockUserRequestDto
+import com.example.data.remote.CreatePayoutRequestDto
+import com.example.data.remote.CreateReportRequestDto
 import com.example.data.remote.FirestoreChatService
+import com.example.data.remote.JoinMatchRequestDto
+import com.example.data.remote.LeaveMatchRequestDto
+import com.example.data.remote.LiveStreamDto
+import com.example.data.remote.MatchJoinPollResponseDto
+import com.example.data.remote.ModerationReportDto
+import com.example.data.remote.PayoutRequestDto
+import com.example.data.remote.RecruitSubAgentRequestDto
+import com.example.data.remote.ResolveReportRequestDto
+import com.example.data.remote.ReviewAgeRequestDto
+import com.example.data.remote.ReviewPayoutRequestDto
+import com.example.data.remote.SendGiftRequestDto
+import com.example.data.remote.SpendCoinsRequestDto
+import com.example.data.remote.StartStreamRequestDto
+import com.example.data.remote.StreamSessionResponseDto
+import com.example.data.remote.SubmitAgeVerificationRequestDto
+import com.example.data.remote.VerifyPlayPurchaseRequestDto
+import com.example.util.AgePolicyUtils
+import com.example.util.SecurityUtils
+import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.auth.FirebaseUser
+import java.util.UUID
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.firstOrNull
+import kotlinx.coroutines.tasks.await
 
 class AyerRepository(
+    private val context: Context,
     private val userDao: UserDao,
     private val transactionDao: TransactionDao,
     private val notificationDao: NotificationDao,
-    private val secondaryProfileDao: SecondaryProfileDao
+    private val secondaryProfileDao: SecondaryProfileDao,
+    private val platformApi: BackendPlatformApi? = buildOptionalPlatformApi()
 ) {
-    private val firestoreChatService = FirestoreChatService()
+    companion object {
+        private fun buildOptionalPlatformApi(): BackendPlatformApi? {
+            val url = BuildConfig.CALL_BACKEND_URL.trim()
+            val isAllowedScheme = url.startsWith("https://") ||
+                (BuildConfig.DEBUG && url.startsWith("http://"))
+            return if (isAllowedScheme) BackendPlatformApi.create(url) else null
+        }
+    }
+
+    private val firestoreChatService = FirestoreChatService(context.applicationContext)
 
     val userProfile: Flow<UserProfile?> = userDao.getUserProfile()
     val transactions: Flow<List<PointTransaction>> = transactionDao.getAllTransactions()
     val notifications: Flow<List<AppNotification>> = notificationDao.getAllNotifications()
     val unreadNotificationCount: Flow<Int> = notificationDao.getUnreadCount()
 
-    // Points Engagement Management System State
+    private val _blockedUserIds = MutableStateFlow<Set<String>>(emptySet())
+    val blockedUserIds = _blockedUserIds.asStateFlow()
+
+    private val _subAgents = MutableStateFlow<List<SubAgentItem>>(emptyList())
+    val subAgents = _subAgents.asStateFlow()
+
+    private val _myPayouts = MutableStateFlow<List<PayoutRequestDto>>(emptyList())
+    val myPayouts = _myPayouts.asStateFlow()
+
     private val _engagementState = MutableStateFlow(UserEngagementState())
     val engagementState = _engagementState.asStateFlow()
 
-    // Daily Missions System
     private val _dailyMissions = MutableStateFlow(
         listOf(
             DailyMissionItem(
@@ -51,7 +106,7 @@ class AyerRepository(
                 title = "مشاهدة البث المباشر",
                 description = "شاهد البثوث المباشرة لمدة 30 دقيقة اليوم",
                 iconName = "live",
-                currentProgress = 18,
+                currentProgress = 0,
                 targetProgress = 30,
                 rewardPoints = 35,
                 unit = "دقيقة"
@@ -61,7 +116,7 @@ class AyerRepository(
                 title = "إرسال رسائل في الدردشة",
                 description = "تفاعل وأرسل 10 رسائل في غرف المطابقة والمحادثات",
                 iconName = "chat",
-                currentProgress = 6,
+                currentProgress = 0,
                 targetProgress = 10,
                 rewardPoints = 20,
                 unit = "رسائل"
@@ -71,7 +126,7 @@ class AyerRepository(
                 title = "إجراء مطابقات عشوائية",
                 description = "أكمل 5 مطابقات جديدة وتواصل مع أعضاء حول العالم",
                 iconName = "match",
-                currentProgress = 4,
+                currentProgress = 0,
                 targetProgress = 5,
                 rewardPoints = 25,
                 unit = "مطابقة"
@@ -81,7 +136,7 @@ class AyerRepository(
                 title = "إرسال هدايا تشجيعية",
                 description = "ادعم المضيفين المفضلين بإرسال 3 هدايا في البث",
                 iconName = "gift",
-                currentProgress = 2,
+                currentProgress = 0,
                 targetProgress = 3,
                 rewardPoints = 30,
                 unit = "هدايا"
@@ -91,7 +146,7 @@ class AyerRepository(
                 title = "تسجيل الحضور اليومي",
                 description = "حافظ على سلسلة التواجد اليومي النشط في التطبيق",
                 iconName = "login",
-                currentProgress = 1,
+                currentProgress = 0,
                 targetProgress = 1,
                 rewardPoints = 15,
                 unit = "يوم"
@@ -100,11 +155,277 @@ class AyerRepository(
     )
     val dailyMissions = _dailyMissions.asStateFlow()
 
-    // Moderation & Stream Flags
     val flaggedStreamIds = firestoreChatService.flaggedStreamIds
     val submittedReports = firestoreChatService.submittedReports
 
-    // Firestore Real-Time Random Chat Integration
+    private suspend fun getBearerHeader(): String? {
+        val token = try {
+            FirebaseAuth.getInstance().currentUser?.getIdToken(false)?.await()?.token
+        } catch (_: Throwable) {
+            null
+        }
+        return token?.takeIf { it.isNotBlank() }?.let { "Bearer $it" }
+    }
+
+    private suspend fun applyAuthoritativeSummary(
+        backendUser: BackendUserDto? = null,
+        wallet: BackendWalletDto,
+        ledgerEntries: List<BackendLedgerEntryDto>? = null
+    ) {
+        val current = userDao.getUserProfileSync() ?: UserProfile()
+        val updated = current.copy(
+            uid = backendUser?.uid?.ifBlank { current.uid } ?: current.uid,
+            name = backendUser?.displayName?.ifBlank { current.name } ?: current.name,
+            email = backendUser?.email?.ifBlank { current.email } ?: current.email,
+            dob = backendUser?.dob ?: current.dob,
+            age = backendUser?.ageYears?.takeIf { it > 0 } ?: current.age,
+            ageVerified = backendUser?.ageVerified ?: current.ageVerified,
+            ageVerificationStatus = backendUser?.ageVerificationStatus?.ifBlank { current.ageVerificationStatus } ?: current.ageVerificationStatus,
+            isAdmin = backendUser?.isAdmin ?: current.isAdmin,
+            isAgent = backendUser?.isAgent ?: current.isAgent,
+            isHost = backendUser?.isHost ?: current.isHost,
+            hostStatus = backendUser?.hostStatus?.ifBlank { current.hostStatus } ?: current.hostStatus,
+            agentCommissionPercent = backendUser?.agentCommissionPercent ?: current.agentCommissionPercent,
+            hostCommissionPercent = backendUser?.hostCommissionPercent ?: current.hostCommissionPercent,
+            agencyId = backendUser?.agencyId?.ifBlank { current.agencyId } ?: current.agencyId,
+            agencyName = backendUser?.agencyName?.ifBlank { current.agencyName } ?: current.agencyName,
+            referralCode = backendUser?.referralCode?.ifBlank { current.referralCode } ?: current.referralCode,
+            profileVisibility = backendUser?.profileVisibility?.ifBlank { current.profileVisibility } ?: current.profileVisibility,
+            directMessagePermission = backendUser?.directMessagePermission?.ifBlank { current.directMessagePermission } ?: current.directMessagePermission,
+            pointsBalance = wallet.pointsBalance,
+            hostEarningsCoins = wallet.hostEarningsCoins,
+            subAgentsEarningsCoins = wallet.subAgentsEarningsCoins,
+            totalAccumulatedPoints = wallet.totalAccumulatedPoints,
+            totalPointsSpent = wallet.totalPointsSpent,
+            lastDailyClaimTime = wallet.lastDailyClaimMs
+        )
+        userDao.insertUser(updated)
+        if (ledgerEntries != null) {
+            transactionDao.clearAll()
+            ledgerEntries.forEach { entry ->
+                transactionDao.insertTransaction(
+                    PointTransaction(
+                        type = entry.type,
+                        amount = entry.amount,
+                        description = entry.description,
+                        timestamp = if (entry.timestamp > 0L) entry.timestamp else System.currentTimeMillis()
+                    )
+                )
+            }
+        }
+    }
+
+    suspend fun syncAuthenticatedUser(firebaseUser: FirebaseUser): Result<UserProfile> {
+        val remoteResult = firestoreChatService.syncUserOnSignIn(firebaseUser)
+        val localExisting = userDao.getUserProfileSync()
+
+        val remoteDoc = remoteResult.getOrNull()
+        val resolvedProfile = if (remoteDoc != null) {
+            UserProfile(
+                id = 1L,
+                uid = firebaseUser.uid,
+                name = remoteDoc.displayName.ifBlank {
+                    firebaseUser.displayName ?: firebaseUser.email?.substringBefore('@') ?: "مستخدم HUH"
+                },
+                age = remoteDoc.age,
+                country = remoteDoc.country,
+                countryCode = remoteDoc.countryCode,
+                gender = remoteDoc.gender,
+                pointsBalance = remoteDoc.pointsBalance,
+                totalAccumulatedPoints = remoteDoc.totalAccumulatedPoints,
+                totalPointsSpent = remoteDoc.totalPointsSpent,
+                lastDailyClaimTime = localExisting?.lastDailyClaimTime ?: 0L,
+                ageVerified = remoteDoc.ageVerified,
+                ageVerificationStatus = remoteDoc.ageVerificationStatus,
+                dob = remoteDoc.dob,
+                acceptedTermsAt = remoteDoc.acceptedTermsAt?.toDate()?.time,
+                acceptedPrivacyAt = remoteDoc.acceptedPrivacyAt?.toDate()?.time,
+                isHost = remoteDoc.isHost,
+                hostStatus = remoteDoc.hostStatus,
+                isAgent = remoteDoc.isAgent,
+                isAdmin = remoteDoc.isAdmin,
+                agentCommissionPercent = remoteDoc.agentCommissionPercent,
+                subAgentsEarningsCoins = remoteDoc.subAgentsEarningsCoins,
+                subAgentsCount = remoteDoc.subAgentsCount,
+                referralCode = localExisting?.referralCode ?: "HUH-${firebaseUser.uid.take(6).uppercase()}",
+                agencyName = localExisting?.agencyName ?: "",
+                agencyId = localExisting?.agencyId ?: "",
+                agencyRole = localExisting?.agencyRole ?: "",
+                agencyJoinedDate = localExisting?.agencyJoinedDate ?: "",
+                agencyManagerName = localExisting?.agencyManagerName ?: "",
+                agencyActiveHostsCount = localExisting?.agencyActiveHostsCount ?: 0,
+                agencyMonthlyTargetProgress = localExisting?.agencyMonthlyTargetProgress ?: 0,
+                hostCommissionPercent = remoteDoc.hostCommissionPercent,
+                hostEarningsCoins = remoteDoc.hostEarningsCoins,
+                totalMatchesCount = localExisting?.totalMatchesCount ?: 0,
+                agencyLevel = localExisting?.agencyLevel ?: "Lv.1 🌟",
+                bio = remoteDoc.bio,
+                phoneNumber = localExisting?.phoneNumber ?: "",
+                email = remoteDoc.email.ifBlank { firebaseUser.email.orEmpty() },
+                avatarResId = localExisting?.avatarResId ?: com.example.R.drawable.img_user_avatar,
+                avatarCustomUri = remoteDoc.photoUrl ?: localExisting?.avatarCustomUri,
+                profileVisibility = remoteDoc.profileVisibility,
+                directMessagePermission = remoteDoc.directMessagePermission
+            )
+        } else {
+            (localExisting ?: UserProfile()).copy(
+                id = 1L,
+                uid = firebaseUser.uid,
+                name = localExisting?.name?.takeIf { it.isNotBlank() }
+                    ?: firebaseUser.displayName
+                    ?: firebaseUser.email?.substringBefore('@')
+                    ?: "مستخدم HUH",
+                email = firebaseUser.email ?: localExisting?.email.orEmpty(),
+                avatarCustomUri = firebaseUser.photoUrl?.toString() ?: localExisting?.avatarCustomUri,
+                referralCode = localExisting?.referralCode?.takeIf { it.isNotBlank() }
+                    ?: "HUH-${firebaseUser.uid.take(6).uppercase()}"
+            )
+        }
+
+        userDao.insertUser(resolvedProfile)
+        // Authoritative backend PostgreSQL sync (wallet, transactions, role flags, blocks)
+        val api = platformApi
+        val bearer = getBearerHeader()
+        if (api != null && bearer != null) {
+            runCatching {
+                val res = api.syncAuth(
+                    bearer,
+                    AuthSyncRequestDto(
+                        displayName = resolvedProfile.name,
+                        email = resolvedProfile.email
+                    )
+                )
+                if (res.isSuccessful && res.body() != null) {
+                    val body = res.body()!!
+                    applyAuthoritativeSummary(body.user, body.wallet, body.transactions)
+                }
+                val blocksRes = api.getBlocks(bearer)
+                if (blocksRes.isSuccessful && blocksRes.body() != null) {
+                    _blockedUserIds.value = blocksRes.body()!!.blockedUsers.toSet()
+                }
+            }
+        }
+        _dailyMissions.value = _dailyMissions.value.map { mission ->
+            if (mission.id == "mission_daily_login") {
+                mission.copy(currentProgress = 1)
+            } else {
+                mission
+            }
+        }
+        if (remoteResult.isFailure && localExisting == null) {
+            return Result.failure(remoteResult.exceptionOrNull() ?: IllegalStateException("Sync failed"))
+        }
+        return Result.success(userDao.getUserProfileSync() ?: resolvedProfile)
+    }
+
+    suspend fun applyRemoteUserSnapshot(doc: FirestoreUserDoc) {
+        val current = userDao.getUserProfileSync() ?: UserProfile()
+        if (current.uid.isNotBlank() && doc.uid.isNotBlank() && current.uid != doc.uid) return
+        userDao.insertUser(
+            current.copy(
+                uid = doc.uid.ifBlank { current.uid },
+                name = doc.displayName.ifBlank { current.name },
+                email = doc.email.ifBlank { current.email },
+                bio = doc.bio.ifBlank { current.bio },
+                country = doc.country.ifBlank { current.country },
+                countryCode = doc.countryCode.ifBlank { current.countryCode },
+                gender = doc.gender.ifBlank { current.gender },
+                age = if (doc.age > 0) doc.age else current.age,
+                dob = doc.dob ?: current.dob,
+                acceptedTermsAt = doc.acceptedTermsAt?.toDate()?.time ?: current.acceptedTermsAt,
+                acceptedPrivacyAt = doc.acceptedPrivacyAt?.toDate()?.time ?: current.acceptedPrivacyAt,
+                ageVerified = doc.ageVerified,
+                ageVerificationStatus = doc.ageVerificationStatus,
+                isAdmin = doc.isAdmin,
+                isAgent = doc.isAgent,
+                isHost = doc.isHost,
+                hostStatus = doc.hostStatus,
+                agentCommissionPercent = doc.agentCommissionPercent,
+                hostCommissionPercent = doc.hostCommissionPercent,
+                pointsBalance = doc.pointsBalance,
+                totalAccumulatedPoints = doc.totalAccumulatedPoints,
+                totalPointsSpent = doc.totalPointsSpent,
+                hostEarningsCoins = doc.hostEarningsCoins,
+                subAgentsEarningsCoins = doc.subAgentsEarningsCoins,
+                subAgentsCount = doc.subAgentsCount,
+                profileVisibility = doc.profileVisibility.ifBlank { current.profileVisibility },
+                directMessagePermission = doc.directMessagePermission.ifBlank { current.directMessagePermission }
+            )
+        )
+    }
+
+    fun observeRemoteUserDoc(uid: String): Flow<FirestoreUserDoc?> =
+        firestoreChatService.observeUserDoc(uid)
+
+    fun observeAgeVerification(uid: String): Flow<AgeVerificationSubmissionDoc?> =
+        firestoreChatService.observeAgeVerification(uid)
+
+    suspend fun submitAgeVerification(
+        uid: String,
+        displayName: String,
+        email: String,
+        dobInput: String,
+        acceptedTerms: Boolean,
+        acceptedPrivacy: Boolean
+    ): Result<AgePolicyUtils.AgeCheckResult> {
+        if (!acceptedTerms || !acceptedPrivacy) {
+            return Result.failure(IllegalArgumentException("يجب الموافقة على شروط الاستخدام وسياسة الخصوصية أولاً."))
+        }
+        val check = AgePolicyUtils.evaluateDob(dobInput)
+        if (!check.isValidFormat || !check.isAdult) {
+            return Result.failure(IllegalArgumentException(check.errorMessage ?: "غير مؤهل عمرياً (+18 مطلوب)."))
+        }
+
+        val remote = firestoreChatService.submitAgeVerification(
+            uid = uid,
+            displayName = displayName,
+            email = email,
+            dob = check.normalizedDob,
+            ageYears = check.ageYears
+        )
+        if (remote.isFailure) {
+            return Result.failure(remote.exceptionOrNull() ?: IllegalStateException("تعذر إرسال طلب التحقق."))
+        }
+
+        val now = System.currentTimeMillis()
+        val api = platformApi
+        val bearer = getBearerHeader()
+        if (api != null && bearer != null) {
+            runCatching {
+                api.submitAgeVerification(
+                    bearer,
+                    SubmitAgeVerificationRequestDto(
+                        displayName = displayName,
+                        email = email,
+                        dob = check.normalizedDob,
+                        ageYears = check.ageYears,
+                        acceptedTermsAt = now,
+                        acceptedPrivacyAt = now
+                    )
+                )
+            }
+        }
+
+        userDao.updateAgeVerificationState(
+            ageVerified = false,
+            status = "PENDING_REVIEW",
+            dob = check.normalizedDob,
+            age = check.ageYears,
+            acceptedTermsAt = now,
+            acceptedPrivacyAt = now
+        )
+        return Result.success(check)
+    }
+
+    suspend fun clearLocalSessionData() {
+        firestoreChatService.stopObserving()
+        userDao.clearAll()
+        transactionDao.clearAll()
+        notificationDao.clearAll()
+        secondaryProfileDao.clearAll()
+        _engagementState.value = UserEngagementState()
+    }
+
     fun observeFirestoreMatchMessages(matchId: String): Flow<List<FirestoreRandomChatMessage>> {
         return firestoreChatService.observeMatchMessages(matchId)
     }
@@ -131,19 +452,19 @@ class AyerRepository(
 
     suspend fun submitLiveStreamReport(report: LiveStreamReport): Result<Boolean> {
         val result = firestoreChatService.submitStreamModerationReport(report)
-        notificationDao.insertNotification(
-            AppNotification(
-                title = "تم استلام البلاغ الأمني 🛡️",
-                message = "تم إرسال بلاغك عن بث ${report.hostName} ووضع علامة مراجعة أمنية فورية على البث في سيرفر Firestore.",
-                type = NotificationType.SYSTEM_ALERT
+        if (result.isSuccess) {
+            notificationDao.insertNotification(
+                AppNotification(
+                    title = "تم استلام البلاغ الأمني 🛡️",
+                    message = "تم إرسال بلاغك عن بث ${report.hostName} لقائمة المراجعة الإدارية.",
+                    type = NotificationType.SYSTEM_ALERT
+                )
             )
-        )
+        }
         return result
     }
 
-    // Engagement & Daily Missions Tracking System
     suspend fun recordChatMessageEngagement() {
-        // Increment chat mission
         val currentMissions = _dailyMissions.value
         _dailyMissions.value = currentMissions.map { mission ->
             if (mission.id == "mission_chat") {
@@ -164,7 +485,6 @@ class AyerRepository(
             todayMatchesCount = newMatches,
             todayEngagementPoints = current.todayEngagementPoints + bonus + 5
         )
-        // Update mission
         _dailyMissions.value = _dailyMissions.value.map { mission ->
             if (mission.id == "mission_matches") {
                 mission.copy(currentProgress = newMatches.coerceAtMost(mission.targetProgress))
@@ -190,7 +510,6 @@ class AyerRepository(
             todayStreamMinutes = newMins,
             todayEngagementPoints = current.todayEngagementPoints + bonus + 10
         )
-        // Update mission
         _dailyMissions.value = _dailyMissions.value.map { mission ->
             if (mission.id == "mission_stream") {
                 mission.copy(currentProgress = newMins.coerceAtMost(mission.targetProgress))
@@ -216,7 +535,6 @@ class AyerRepository(
             todayGiftsSent = newGifts,
             todayEngagementPoints = current.todayEngagementPoints + bonus + 15
         )
-        // Update mission
         _dailyMissions.value = _dailyMissions.value.map { mission ->
             if (mission.id == "mission_gifts") {
                 mission.copy(currentProgress = newGifts.coerceAtMost(mission.targetProgress))
@@ -276,142 +594,34 @@ class AyerRepository(
         return false
     }
 
-    fun getCreatorsLeaderboard(
+    suspend fun getCreatorsLeaderboard(
         scope: LeaderboardScope,
         timeframe: LeaderboardTimeframe,
         userAccumulatedPoints: Int
     ): List<CreatorLeaderboardItem> {
+        val user = userDao.getUserProfileSync() ?: return emptyList()
+        if (scope == LeaderboardScope.AGENCY && user.agencyName.isBlank()) {
+            return emptyList()
+        }
         val factor = when (timeframe) {
-            LeaderboardTimeframe.TODAY -> 0.08f
-            LeaderboardTimeframe.THIS_WEEK -> 0.35f
+            LeaderboardTimeframe.TODAY -> 0.25f
+            LeaderboardTimeframe.THIS_WEEK -> 0.6f
             LeaderboardTimeframe.ALL_TIME -> 1.0f
         }
-
-        val allCreators = listOf(
+        return listOf(
             CreatorLeaderboardItem(
                 rank = 1,
-                id = "cr_1",
-                name = "سارة القحطاني 🇸🇦",
-                country = "المملكة العربية السعودية",
-                countryCode = "SA",
-                agencyName = "الوكالة الماسية - Diamond Agency",
-                pointsAccumulated = (185400 * factor).toInt(),
-                followersCount = 89200,
-                isLiveNow = true
-            ),
-            CreatorLeaderboardItem(
-                rank = 2,
-                id = "cr_2",
-                name = "Elena Rostova 🇷🇺",
-                country = "روسيا",
-                countryCode = "RU",
-                agencyName = "Global Talent Agency",
-                pointsAccumulated = (162300 * factor).toInt(),
-                followersCount = 74100,
-                isLiveNow = true
-            ),
-            CreatorLeaderboardItem(
-                rank = 3,
-                id = "cr_3",
-                name = "كريم المصري 🇪🇬",
-                country = "مصر",
-                countryCode = "EG",
-                agencyName = "وكالة النيل لايف",
-                pointsAccumulated = (138700 * factor).toInt(),
-                followersCount = 58900,
-                isLiveNow = false
-            ),
-            CreatorLeaderboardItem(
-                rank = 4,
-                id = "cr_4",
-                name = "نور الهدى 🇱🇧",
-                country = "لبنان",
-                countryCode = "LB",
-                agencyName = "الوكالة الماسية - Diamond Agency",
-                pointsAccumulated = (119500 * factor).toInt(),
-                followersCount = 42300,
-                isLiveNow = true
-            ),
-            CreatorLeaderboardItem(
-                rank = 5,
-                id = "cr_5",
-                name = "Yuki Tanaka 🇯🇵",
-                country = "اليابان",
-                countryCode = "JP",
-                agencyName = "Tokyo Stars Agency",
-                pointsAccumulated = (98200 * factor).toInt(),
-                followersCount = 38400,
-                isLiveNow = false
-            ),
-            CreatorLeaderboardItem(
-                rank = 6,
-                id = "cr_6",
-                name = "مريم التونسية 🇹🇳",
-                country = "تونس",
-                countryCode = "TN",
-                agencyName = "الوكالة الماسية - Diamond Agency",
-                pointsAccumulated = (84100 * factor).toInt(),
-                followersCount = 29500,
-                isLiveNow = true
-            ),
-            CreatorLeaderboardItem(
-                rank = 7,
-                id = "cr_7",
-                name = "Carlos Mendoza 🇲🇽",
-                country = "المكسيك",
-                countryCode = "MX",
-                agencyName = "Fiesta Live Agency",
-                pointsAccumulated = (71300 * factor).toInt(),
-                followersCount = 24800,
-                isLiveNow = false
-            ),
-            CreatorLeaderboardItem(
-                rank = 8,
-                id = "cr_8",
-                name = "طارق الزهراني 🇸🇦",
-                country = "المملكة العربية السعودية",
-                countryCode = "SA",
-                agencyName = "الوكالة الماسية - Diamond Agency",
-                pointsAccumulated = (58900 * factor).toInt(),
-                followersCount = 19600,
-                isLiveNow = false
-            ),
-            CreatorLeaderboardItem(
-                rank = 9,
-                id = "cr_9",
-                name = "Amira Dubai 🇦🇪",
-                country = "الإمارات",
-                countryCode = "AE",
-                agencyName = "Gulf Stars Agency",
-                pointsAccumulated = (46200 * factor).toInt(),
-                followersCount = 15300,
-                isLiveNow = true
-            ),
-            CreatorLeaderboardItem(
-                rank = 10,
-                id = "cr_user",
-                name = "سامر (أنت)",
-                country = "المملكة العربية السعودية",
-                countryCode = "SA",
-                agencyName = "الوكالة الماسية - Diamond Agency",
+                id = user.uid.ifBlank { "user_self" },
+                name = user.name.ifBlank { "حسابك" },
+                country = user.country.ifBlank { "غير محدد" },
+                countryCode = user.countryCode.ifBlank { "SA" },
+                agencyName = user.agencyName.ifBlank { "بدون وكالة" },
                 pointsAccumulated = (userAccumulatedPoints * factor).toInt(),
-                followersCount = 4850,
+                followersCount = 0,
                 isLiveNow = false,
                 isCurrentUser = true
             )
         )
-
-        val filtered = if (scope == LeaderboardScope.AGENCY) {
-            allCreators.filter { it.agencyName.contains("الوكالة الماسية") || it.isCurrentUser }
-        } else {
-            allCreators
-        }
-
-        // Re-sort and re-rank
-        return filtered.sortedByDescending { it.pointsAccumulated }
-            .mapIndexed { index, creator ->
-                creator.copy(rank = index + 1)
-            }
     }
 
     suspend fun updateAccountSettings(
@@ -422,14 +632,21 @@ class AyerRepository(
         avatarResId: Int = com.example.R.drawable.img_user_avatar,
         avatarCustomUri: String? = null
     ) {
+        val cleanName = name.trim()
+        val cleanBio = bio.trim()
+        val cleanCountry = country.trim()
         userDao.updateAccountSettings(
-            name = name.trim(),
-            bio = bio.trim(),
-            country = country.trim(),
+            name = cleanName,
+            bio = cleanBio,
+            country = cleanCountry,
             phoneNumber = phoneNumber.trim(),
             avatarResId = avatarResId,
             avatarCustomUri = avatarCustomUri
         )
+        val uid = runCatching { FirebaseAuth.getInstance().currentUser?.uid }.getOrNull()
+        if (!uid.isNullOrBlank()) {
+            firestoreChatService.updateUserProfileFields(uid, cleanName, cleanBio, cleanCountry)
+        }
     }
 
     fun getSecondaryProfiles(parentUserId: Long = 1L): Flow<List<SecondaryProfile>> =
@@ -457,12 +674,13 @@ class AyerRepository(
         }
 
         val parentUser = userDao.getUserProfile().firstOrNull() ?: UserProfile()
+        val hashedSecret = SecurityUtils.hashSecret(password)
 
         val profile = SecondaryProfile(
             parentUserId = parentUserId,
             username = cleanUsername,
-            passwordHash = password,
-            displayName = displayName.ifBlank { "مستخدم Ayer الخاص" },
+            passwordHash = hashedSecret,
+            displayName = displayName.ifBlank { "ملف شخصي خاص" },
             bio = bio,
             notificationsEnabled = notificationsEnabled,
             avatarResId = avatarResId ?: com.example.R.drawable.img_live_model_3,
@@ -475,7 +693,10 @@ class AyerRepository(
     suspend fun unlockSecondaryProfileByPassword(passwordAttempt: String, parentUserId: Long = 1L): SecondaryProfile? {
         val cleanPassword = passwordAttempt.trim()
         if (cleanPassword.isBlank()) return null
-        val matched = secondaryProfileDao.findMatchingProfileByPassword(parentUserId, cleanPassword)
+        val profiles = secondaryProfileDao.getAllProfilesForParentSync(parentUserId)
+        val matched = profiles.firstOrNull { profile ->
+            SecurityUtils.verifySecret(cleanPassword, profile.passwordHash)
+        }
         if (matched != null) {
             secondaryProfileDao.updateLastAccessed(matched.id, System.currentTimeMillis())
         }
@@ -490,118 +711,144 @@ class AyerRepository(
         secondaryProfileDao.deleteProfile(id)
     }
 
-    suspend fun initializeDefaultUserIfNeeded() {
-        val existing = userDao.getUserProfile().firstOrNull()
-        if (existing == null) {
-            userDao.insertUser(UserProfile())
-            transactionDao.insertTransaction(
-                PointTransaction(
-                    type = "WELCOME_BONUS",
-                    amount = 45,
-                    description = "مكافأة الانضمام للتطبيق"
-                )
-            )
-
-            // Initial influencer notifications
-            notificationDao.insertNotification(
-                AppNotification(
-                    title = "مرحباً بك في نظام شركاء Ayer 🌟",
-                    message = "تم تفعيل حسابك كإنفلونسر مؤهل. يمكنك ترقية حسابك إلى وكيل VIP وبدء جني العمولات من الإحالات ومضيفي البث.",
-                    type = NotificationType.SYSTEM_ALERT,
-                    timestamp = System.currentTimeMillis() - 86400000L,
-                    isRead = true
-                )
-            )
-            notificationDao.insertNotification(
-                AppNotification(
-                    title = "إحالة جديدة انضمت لشبكتك! 👥",
-                    message = "انضم الوكيل 'عمر الفاروق' من السعودية عبر كود الإحالة الخاص بك. تم قيد +250 نقطة مكافأة انضمام في محفظتك 💎",
-                    type = NotificationType.NEW_REFERRAL,
-                    amountCoins = 250,
-                    timestamp = System.currentTimeMillis() - 3600000L,
-                    senderName = "عمر الفاروق",
-                    isRead = false
-                )
-            )
-            notificationDao.insertNotification(
-                AppNotification(
-                    title = "دفعة عمولة جديدة مستلمة! 💰",
-                    message = "تم إيداع 560 نقطة (≈ $56.00) في محفظتك كعمولة أرباح من نشاط مضيفي 'كاريزما إيجنسي' 🌟",
-                    type = NotificationType.COMMISSION_PAYOUT,
-                    amountCoins = 560,
-                    timestamp = System.currentTimeMillis() - 1800000L,
-                    senderName = "كاريزما إيجنسي",
-                    isRead = false
-                )
-            )
+    suspend fun refreshWalletFromBackend(): Result<Unit> {
+        val api = platformApi ?: return Result.failure(IllegalStateException("الخادم المالي غير مهيأ"))
+        val bearer = getBearerHeader() ?: return Result.failure(IllegalStateException("مطلوب تسجيل دخول صالح"))
+        return try {
+            val res = api.getWalletSummary(bearer)
+            if (res.isSuccessful && res.body() != null) {
+                val body = res.body()!!
+                applyAuthoritativeSummary(body.user, body.wallet, body.transactions)
+                Result.success(Unit)
+            } else {
+                Result.failure(IllegalStateException(BackendPlatformApi.extractErrorMessage(res, "تعذر تحديث رصيد المحفظة")))
+            }
+        } catch (t: Throwable) {
+            Result.failure(t)
         }
     }
 
-    suspend fun claimDailyReward(): Boolean {
-        val user = userDao.getUserProfile().firstOrNull() ?: UserProfile()
-        val now = System.currentTimeMillis()
-        val oneDayMillis = 24 * 60 * 60 * 1000L
-        if (now - user.lastDailyClaimTime >= oneDayMillis || user.lastDailyClaimTime == 0L) {
-            val rewardCoins = 10
-            userDao.claimDailyPoints(coins = rewardCoins, claimTime = now)
-            transactionDao.insertTransaction(
-                PointTransaction(
-                    type = "DAILY_FREE",
-                    amount = rewardCoins,
-                    description = "النقاط اليومية المجانية (+10)"
+    suspend fun verifyAndCreditPlayPurchase(
+        productId: String,
+        purchaseToken: String,
+        orderId: String?
+    ): Result<Int> {
+        val api = platformApi ?: return Result.failure(IllegalStateException("لا يمكن شحن النقاط بدون الاتصال بخادم التحقق الرسمي."))
+        val bearer = getBearerHeader() ?: return Result.failure(IllegalStateException("يرجى تسجيل الدخول بحساب Google قبل الشراء."))
+        return try {
+            val res = api.verifyPlayPurchase(
+                bearer,
+                VerifyPlayPurchaseRequestDto(
+                    packageName = context.packageName,
+                    productId = productId,
+                    purchaseToken = purchaseToken,
+                    orderId = orderId
                 )
             )
-            return true
+            if (res.isSuccessful && res.body() != null) {
+                val credited = res.body()!!.creditedCoins
+                refreshWalletFromBackend()
+                Result.success(credited)
+            } else {
+                Result.failure(IllegalStateException(BackendPlatformApi.extractErrorMessage(res, "فشل التحقق من عملية الشراء لدى الخادم.")))
+            }
+        } catch (t: Throwable) {
+            Result.failure(IllegalStateException(t.localizedMessage ?: "تعذر الاتصال بخادم التحقق المالي."))
         }
-        return false
+    }
+
+    suspend fun claimDailyRewardResult(): Result<Int> {
+        val api = platformApi ?: return Result.failure(IllegalStateException("يتطلب استلام المكافأة اليومية اتصالاً بخادم الحسابات."))
+        val bearer = getBearerHeader() ?: return Result.failure(IllegalStateException("يرجى تسجيل الدخول أولاً."))
+        return try {
+            val res = api.claimDailyBonus(bearer)
+            if (res.isSuccessful && res.body() != null) {
+                val credited = res.body()!!.creditedCoins
+                refreshWalletFromBackend()
+                Result.success(credited)
+            } else {
+                Result.failure(IllegalStateException(BackendPlatformApi.extractErrorMessage(res, "تم استلام المكافأة اليومية بالفعل.")))
+            }
+        } catch (t: Throwable) {
+            Result.failure(IllegalStateException(t.localizedMessage ?: "تعذر الاتصال بالخادم"))
+        }
     }
 
     suspend fun spendPointsForMatch(cost: Int, filterDesc: String): Boolean {
-        val user = userDao.getUserProfile().firstOrNull() ?: return false
-        if (user.pointsBalance >= cost) {
-            userDao.adjustPoints(-cost)
-            transactionDao.insertTransaction(
-                PointTransaction(
-                    type = "MATCH_SPEND",
-                    amount = -cost,
-                    description = "مطابقة عشوائية ($filterDesc)"
+        val api = platformApi
+        val bearer = getBearerHeader()
+        if (api != null && bearer != null) {
+            val res = runCatching {
+                api.spendCoins(
+                    bearer,
+                    SpendCoinsRequestDto(
+                        amount = cost,
+                        entryType = "MATCH_SPEND",
+                        description = "مطابقة عشوائية ($filterDesc)",
+                        idempotencyKey = "match_${UUID.randomUUID()}"
+                    )
                 )
-            )
-            return true
+            }.getOrNull() ?: return false
+            if (res.isSuccessful && res.body() != null) {
+                refreshWalletFromBackend()
+                return true
+            }
+            return false
         }
         return false
     }
 
-    suspend fun sendGift(gift: GiftItem, streamHost: String): Boolean {
-        val user = userDao.getUserProfile().firstOrNull() ?: return false
-        if (user.pointsBalance >= gift.pointsCost) {
-            userDao.adjustPoints(-gift.pointsCost)
-            transactionDao.insertTransaction(
-                PointTransaction(
-                    type = "GIFT_SENT",
-                    amount = -gift.pointsCost,
-                    description = "إرسال هدية ${gift.name} ${gift.emoji} إلى $streamHost"
+    suspend fun sendGift(gift: GiftItem, streamHost: String, recipientUid: String = "", streamId: String? = null): Boolean {
+        val api = platformApi
+        val bearer = getBearerHeader()
+        if (api != null && bearer != null && recipientUid.isNotBlank()) {
+            val res = runCatching {
+                api.sendGift(
+                    bearer,
+                    SendGiftRequestDto(
+                        recipientUid = recipientUid,
+                        giftId = gift.id,
+                        giftName = "${gift.name} ${gift.emoji}",
+                        coinsCost = gift.pointsCost,
+                        idempotencyKey = "gift_${UUID.randomUUID()}",
+                        streamId = streamId
+                    )
                 )
-            )
-            return true
+            }.getOrNull() ?: return false
+            if (res.isSuccessful && res.body() != null) {
+                refreshWalletFromBackend()
+                return true
+            }
+            return false
+        }
+        if (api != null && bearer != null) {
+            val res = runCatching {
+                api.spendCoins(
+                    bearer,
+                    SpendCoinsRequestDto(
+                        amount = gift.pointsCost,
+                        entryType = "GIFT_SENT",
+                        description = "إرسال هدية ${gift.name} ${gift.emoji} إلى $streamHost",
+                        idempotencyKey = "gift_${UUID.randomUUID()}",
+                        referenceId = streamId
+                    )
+                )
+            }.getOrNull() ?: return false
+            if (res.isSuccessful) {
+                refreshWalletFromBackend()
+                return true
+            }
+            return false
         }
         return false
-    }
-
-    suspend fun purchaseCoinPackage(coinPackage: CoinPackage) {
-        val totalCoins = coinPackage.coins + coinPackage.bonusCoins
-        userDao.adjustPoints(totalCoins)
-        transactionDao.insertTransaction(
-            PointTransaction(
-                type = "PURCHASE",
-                amount = totalCoins,
-                description = "شراء باقة $totalCoins نقطة ($${coinPackage.priceUsd})"
-            )
-        )
     }
 
     suspend fun adjustPoints(delta: Int) {
-        userDao.adjustPoints(delta)
+        if (delta >= 0) return // Zero unverified local point minting allowed
+        val user = userDao.getUserProfileSync() ?: return
+        if (user.pointsBalance + delta >= 0) {
+            userDao.adjustPoints(delta)
+        }
     }
 
     suspend fun addTransaction(title: String, type: String, amount: Int) {
@@ -618,81 +865,243 @@ class AyerRepository(
         userDao.updateHostStatus("PENDING", isHost = false)
     }
 
-    suspend fun approveHostDemo() {
-        userDao.updateHostStatus("APPROVED", isHost = true)
-    }
-
-    suspend fun toggleAgentStatus(isAgent: Boolean) {
-        userDao.updateAgentStatus(isAgent)
-    }
-
-    suspend fun updateAgentCommissionFromAdmin(percent: Int) {
-        userDao.updateAgentCommission(percent)
-    }
-
-    suspend fun recruitSubAgent(name: String, country: String): AppNotification {
-        val commissionBonus = 250 // مكافأة انضمام وكيل فرعي
-        userDao.addSubAgentWithBonus(commissionBonus)
-        transactionDao.insertTransaction(
-            PointTransaction(
-                type = "AGENT_COMMISSION",
-                amount = commissionBonus,
-                description = "عمولة دعوة وكيل جديد: $name ($country)"
-            )
-        )
-        val notif = AppNotification(
-            title = "إحالة جديدة انضمت لشبكتك! 👥",
-            message = "انضم الوكيل '$name' من $country عبر كود الإحالة الخاص بك. تم إيداع مكافأة +$commissionBonus نقطة عمولة فورية في حسابك 💎",
-            type = NotificationType.NEW_REFERRAL,
-            amountCoins = commissionBonus,
-            senderName = name
-        )
-        val insertedId = notificationDao.insertNotification(notif)
-        return notif.copy(id = insertedId)
-    }
-
-    suspend fun payoutCommission(amountCoins: Int, sourceDescription: String, senderName: String = "شبكة مضيفي البث"): AppNotification {
-        userDao.addCommissionEarnings(amountCoins)
-        transactionDao.insertTransaction(
-            PointTransaction(
-                type = "COMMISSION_PAYOUT",
-                amount = amountCoins,
-                description = "دفعة عمولة مستلمة: $sourceDescription"
-            )
-        )
-        val notif = AppNotification(
-            title = "دفعة عمولة جديدة مستلمة! 💰",
-            message = "تهانينا! تم إيداع $amountCoins نقطة (≈ $${amountCoins / 10}.00) في محفظتك كعمولة أرباح من $sourceDescription 🌟",
-            type = NotificationType.COMMISSION_PAYOUT,
-            amountCoins = amountCoins,
-            senderName = senderName
-        )
-        val insertedId = notificationDao.insertNotification(notif)
-        return notif.copy(id = insertedId)
-    }
-
-    suspend fun withdrawCoins(coins: Int): Boolean {
-        val user = userDao.getUserProfile().firstOrNull() ?: return false
-        if (user.hostEarningsCoins >= coins) {
-            userDao.withdrawHostCoins(coins)
-            transactionDao.insertTransaction(
-                PointTransaction(
-                    type = "WITHDRAWAL",
-                    amount = -coins,
-                    description = "طلب سحب أرباح مضيف ($coins نقطة = $${coins / 10})"
-                )
-            )
-            notificationDao.insertNotification(
-                AppNotification(
-                    title = "تم اعتماد دفعة سحب الأرباح 🏦",
-                    message = "تمت الموافقة على طلب سحب $coins نقطة (≈ $${coins / 10}.00) بنجاح وسيتم تحويلها لحسابك البنكي خلال 24 ساعة.",
-                    type = NotificationType.WITHDRAWAL_PAID,
-                    amountCoins = coins
-                )
-            )
-            return true
+    suspend fun refreshAgencyDashboard(): Result<Unit> {
+        val api = platformApi ?: return Result.failure(IllegalStateException("خادم الوكالات غير متصل"))
+        val bearer = getBearerHeader() ?: return Result.failure(IllegalStateException("مطلوب تسجيل الدخول"))
+        return try {
+            val res = api.getAgencyDashboard(bearer)
+            if (res.isSuccessful && res.body() != null) {
+                val dash = res.body()!!
+                applyAuthoritativeSummary(dash.user, dash.wallet)
+                _subAgents.value = dash.subAgents.map {
+                    SubAgentItem(
+                        id = it.id,
+                        name = it.name,
+                        country = it.country,
+                        hostsCount = it.hostsCount,
+                        monthlyRevenueCoins = it.monthlyRevenueCoins,
+                        agentCommissionEarned = it.agentCommissionEarned,
+                        status = it.status
+                    )
+                }
+                _myPayouts.value = dash.payouts
+                Result.success(Unit)
+            } else {
+                Result.failure(IllegalStateException(BackendPlatformApi.extractErrorMessage(res, "تعذر تحميل بيانات الوكالة")))
+            }
+        } catch (t: Throwable) {
+            Result.failure(t)
         }
-        return false
+    }
+
+    suspend fun recruitSubAgentResult(name: String, country: String): Result<AppNotification> {
+        val api = platformApi ?: return Result.failure(IllegalStateException("خادم الوكالات غير متصل"))
+        val bearer = getBearerHeader() ?: return Result.failure(IllegalStateException("مطلوب تسجيل الدخول"))
+        return try {
+            val res = api.recruitSubAgent(
+                bearer,
+                RecruitSubAgentRequestDto(subAgentName = name.trim(), country = country.trim())
+            )
+            if (res.isSuccessful && res.body() != null) {
+                refreshAgencyDashboard()
+                val notif = AppNotification(
+                    title = "إضافة وكيل فرعي للشبكة 👥",
+                    message = "تم تسجيل الوكيل '${name.trim()}' تحت وكالتك في السجل الرسمي.",
+                    type = NotificationType.NEW_REFERRAL,
+                    senderName = name.trim()
+                )
+                val id = notificationDao.insertNotification(notif)
+                Result.success(notif.copy(id = id))
+            } else {
+                Result.failure(IllegalStateException(BackendPlatformApi.extractErrorMessage(res, "تعذر إضافة الوكيل الفرعي")))
+            }
+        } catch (t: Throwable) {
+            Result.failure(t)
+        }
+    }
+
+    suspend fun requestBankPayout(
+        amountCoins: Int,
+        payoutMethod: String,
+        bankAccountHolder: String,
+        bankName: String,
+        ibanOrAccount: String
+    ): Result<PayoutRequestDto> {
+        val api = platformApi ?: return Result.failure(IllegalStateException("خدمة سحب الأرباح تتطلب الاتصال بالخادم المالي"))
+        val bearer = getBearerHeader() ?: return Result.failure(IllegalStateException("مطلوب تسجيل الدخول"))
+        return try {
+            val res = api.createPayoutRequest(
+                bearer,
+                CreatePayoutRequestDto(
+                    amountCoins = amountCoins,
+                    payoutMethod = payoutMethod,
+                    bankAccountHolder = bankAccountHolder.trim(),
+                    bankName = bankName.trim(),
+                    ibanOrAccount = ibanOrAccount.trim()
+                )
+            )
+            if (res.isSuccessful && res.body() != null) {
+                val created = res.body()!!
+                applyAuthoritativeSummary(wallet = created.wallet)
+                refreshAgencyDashboard()
+                Result.success(created.request)
+            } else {
+                Result.failure(IllegalStateException(BackendPlatformApi.extractErrorMessage(res, "تعذر تقديم طلب السحب")))
+            }
+        } catch (t: Throwable) {
+            Result.failure(t)
+        }
+    }
+
+    // Admin Endpoints
+    suspend fun fetchAdminAgeVerifications(status: String = "PENDING_REVIEW"): Result<List<AdminAgeVerificationItemDto>> {
+        val api = platformApi ?: return Result.failure(IllegalStateException("خادم الإدارة غير مهيأ"))
+        val bearer = getBearerHeader() ?: return Result.failure(IllegalStateException("مطلوب تسجيل الدخول"))
+        return try {
+            val res = api.listAdminAgeVerifications(bearer, status)
+            if (res.isSuccessful && res.body() != null) Result.success(res.body()!!.submissions)
+            else Result.failure(IllegalStateException(BackendPlatformApi.extractErrorMessage(res, "تعذر جلب طلبات +18")))
+        } catch (t: Throwable) {
+            Result.failure(t)
+        }
+    }
+
+    suspend fun reviewAdminAgeVerification(targetUid: String, decision: String, reason: String? = null): Result<Unit> {
+        val api = platformApi ?: return Result.failure(IllegalStateException("خادم الإدارة غير مهيأ"))
+        val bearer = getBearerHeader() ?: return Result.failure(IllegalStateException("مطلوب تسجيل الدخول"))
+        return try {
+            val res = api.reviewAdminAgeVerification(bearer, targetUid, ReviewAgeRequestDto(decision, reason))
+            if (res.isSuccessful) Result.success(Unit)
+            else Result.failure(IllegalStateException(BackendPlatformApi.extractErrorMessage(res, "تعذر مراجعة طلب +18")))
+        } catch (t: Throwable) {
+            Result.failure(t)
+        }
+    }
+
+    suspend fun fetchAdminPayouts(status: String? = null): Result<List<PayoutRequestDto>> {
+        val api = platformApi ?: return Result.failure(IllegalStateException("خادم الإدارة غير مهيأ"))
+        val bearer = getBearerHeader() ?: return Result.failure(IllegalStateException("مطلوب تسجيل الدخول"))
+        return try {
+            val res = api.listAdminPayouts(bearer, status)
+            if (res.isSuccessful && res.body() != null) Result.success(res.body()!!.payouts)
+            else Result.failure(IllegalStateException(BackendPlatformApi.extractErrorMessage(res, "تعذر جلب طلبات السحب")))
+        } catch (t: Throwable) {
+            Result.failure(t)
+        }
+    }
+
+    suspend fun reviewAdminPayout(requestId: String, decision: String, note: String? = null, paymentReference: String? = null): Result<Unit> {
+        val api = platformApi ?: return Result.failure(IllegalStateException("خادم الإدارة غير مهيأ"))
+        val bearer = getBearerHeader() ?: return Result.failure(IllegalStateException("مطلوب تسجيل الدخول"))
+        return try {
+            val res = api.reviewAdminPayout(bearer, requestId, ReviewPayoutRequestDto(decision, note, paymentReference))
+            if (res.isSuccessful) {
+                refreshWalletFromBackend()
+                Result.success(Unit)
+            } else {
+                Result.failure(IllegalStateException(BackendPlatformApi.extractErrorMessage(res, "تعذر تحديث حالة طلب السحب")))
+            }
+        } catch (t: Throwable) {
+            Result.failure(t)
+        }
+    }
+
+    suspend fun updateUserRolesAdmin(
+        targetUid: String,
+        isAgent: Boolean? = null,
+        isHost: Boolean? = null,
+        agentCommissionPercent: Int? = null,
+        hostCommissionPercent: Int? = null,
+        agencyName: String? = null
+    ): Result<BackendUserDto> {
+        val api = platformApi ?: return Result.failure(IllegalStateException("خادم الإدارة غير مهيأ"))
+        val bearer = getBearerHeader() ?: return Result.failure(IllegalStateException("مطلوب تسجيل الدخول"))
+        return try {
+            val res = api.updateUserRolesAdmin(
+                bearer,
+                targetUid,
+                AdminUpdateRolesRequestDto(isAgent, isHost, null, agentCommissionPercent, hostCommissionPercent, agencyName)
+            )
+            if (res.isSuccessful && res.body() != null) {
+                refreshWalletFromBackend()
+                Result.success(res.body()!!.user)
+            } else {
+                Result.failure(IllegalStateException(BackendPlatformApi.extractErrorMessage(res, "تعذر تحديث صلاحيات المستخدم")))
+            }
+        } catch (t: Throwable) {
+            Result.failure(t)
+        }
+    }
+
+    suspend fun fetchAdminReports(status: String = "PENDING_REVIEW"): Result<List<ModerationReportDto>> {
+        val api = platformApi ?: return Result.failure(IllegalStateException("خادم الإدارة غير مهيأ"))
+        val bearer = getBearerHeader() ?: return Result.failure(IllegalStateException("مطلوب تسجيل الدخول"))
+        return try {
+            val res = api.listAdminReports(bearer, status)
+            if (res.isSuccessful && res.body() != null) Result.success(res.body()!!.reports)
+            else Result.failure(IllegalStateException(BackendPlatformApi.extractErrorMessage(res, "تعذر جلب البلاغات")))
+        } catch (t: Throwable) {
+            Result.failure(t)
+        }
+    }
+
+    suspend fun resolveAdminReport(reportId: String, status: String, actionTaken: String): Result<Unit> {
+        val api = platformApi ?: return Result.failure(IllegalStateException("خادم الإدارة غير مهيأ"))
+        val bearer = getBearerHeader() ?: return Result.failure(IllegalStateException("مطلوب تسجيل الدخول"))
+        return try {
+            val res = api.resolveAdminReport(bearer, reportId, ResolveReportRequestDto(status, actionTaken))
+            if (res.isSuccessful) Result.success(Unit)
+            else Result.failure(IllegalStateException(BackendPlatformApi.extractErrorMessage(res, "تعذر البت في البلاغ")))
+        } catch (t: Throwable) {
+            Result.failure(t)
+        }
+    }
+
+    suspend fun blockUser(blockedUid: String): Result<Set<String>> {
+        firestoreChatService.setUserBlocked(blockedUid, blocked = true)
+        val api = platformApi
+        val bearer = getBearerHeader()
+        if (api != null && bearer != null) {
+            val res = runCatching { api.blockUser(bearer, BlockUserRequestDto(blockedUid)) }.getOrNull()
+            if (res?.isSuccessful == true && res.body() != null) {
+                val updated = res.body()!!.blockedUsers.toSet()
+                _blockedUserIds.value = updated
+                return Result.success(updated)
+            }
+        }
+        val next = _blockedUserIds.value + blockedUid
+        _blockedUserIds.value = next
+        return Result.success(next)
+    }
+
+    suspend fun unblockUser(blockedUid: String): Result<Set<String>> {
+        firestoreChatService.setUserBlocked(blockedUid, blocked = false)
+        val api = platformApi
+        val bearer = getBearerHeader()
+        if (api != null && bearer != null) {
+            val res = runCatching { api.unblockUser(bearer, blockedUid) }.getOrNull()
+            if (res?.isSuccessful == true && res.body() != null) {
+                val updated = res.body()!!.blockedUsers.toSet()
+                _blockedUserIds.value = updated
+                return Result.success(updated)
+            }
+        }
+        val next = _blockedUserIds.value - blockedUid
+        _blockedUserIds.value = next
+        return Result.success(next)
+    }
+
+    suspend fun deleteAccountPermanently(): Result<Unit> {
+        val api = platformApi
+        val bearer = getBearerHeader()
+        if (api != null && bearer != null) {
+            val res = runCatching { api.deleteAccount(bearer) }.getOrNull()
+            if (res?.isSuccessful != true) {
+                return Result.failure(IllegalStateException(res?.let { BackendPlatformApi.extractErrorMessage(it, "تعذر حذف الحساب من الخادم") } ?: "تعذر الاتصال بالخادم"))
+            }
+        }
+        clearLocalSessionData()
+        return Result.success(Unit)
     }
 
     suspend fun markNotificationAsRead(id: Long) = notificationDao.markAsRead(id)
@@ -700,23 +1109,15 @@ class AyerRepository(
     suspend fun clearAllNotifications() = notificationDao.clearAll()
     suspend fun insertNotification(notification: AppNotification) = notificationDao.insertNotification(notification)
 
-
-    fun getSampleSubAgents(): List<com.example.data.model.SubAgentItem> {
-        return listOf(
-            com.example.data.model.SubAgentItem("sa_1", "عمر الفاروق - كاريزما إيجنسي", "المملكة العربية السعودية", hostsCount = 14, monthlyRevenueCoins = 28000, agentCommissionEarned = 5600),
-            com.example.data.model.SubAgentItem("sa_2", "ليلى الهاشمي - جولدن ستارز", "الإمارات العربية المتحدة", hostsCount = 9, monthlyRevenueCoins = 19500, agentCommissionEarned = 3900),
-            com.example.data.model.SubAgentItem("sa_3", "يوسف المصري - قاهرة لايف", "مصر", hostsCount = 22, monthlyRevenueCoins = 36000, agentCommissionEarned = 7200),
-            com.example.data.model.SubAgentItem("sa_4", "فهد الشمري - فينيكس هَب", "الكويت", hostsCount = 6, monthlyRevenueCoins = 11200, agentCommissionEarned = 2240)
-        )
-    }
+    fun getSubAgents(): List<SubAgentItem> = _subAgents.value
 
     fun getAvailableCoinPackages(): List<CoinPackage> {
         return listOf(
-            CoinPackage("pkg_1", coins = 50, bonusCoins = 0, priceUsd = 0.99),
-            CoinPackage("pkg_2", coins = 150, bonusCoins = 15, priceUsd = 2.99),
-            CoinPackage("pkg_3", coins = 500, bonusCoins = 80, priceUsd = 9.99, isPopular = true, tag = "الأكثر طلباً"),
-            CoinPackage("pkg_4", coins = 1200, bonusCoins = 250, priceUsd = 21.99, tag = "توفير 20%"),
-            CoinPackage("pkg_5", coins = 3000, bonusCoins = 800, priceUsd = 49.99, tag = "باقة كبار الشخصيات VIP")
+            CoinPackage("pkg_100", coins = 100, bonusCoins = 10, priceUsd = 0.99, productId = "ayer_coins_100"),
+            CoinPackage("pkg_550", coins = 550, bonusCoins = 65, priceUsd = 4.99, isPopular = true, tag = "الأكثر طلباً", productId = "ayer_coins_550"),
+            CoinPackage("pkg_1200", coins = 1200, bonusCoins = 200, priceUsd = 9.99, tag = "توفير 20%", productId = "ayer_coins_1200"),
+            CoinPackage("pkg_3000", coins = 3000, bonusCoins = 600, priceUsd = 24.99, tag = "باقة التميز", productId = "ayer_coins_3000"),
+            CoinPackage("pkg_7500", coins = 7500, bonusCoins = 1800, priceUsd = 59.99, tag = "باقة كبار الشخصيات VIP", productId = "ayer_coins_7500")
         )
     }
 
@@ -731,174 +1132,260 @@ class AyerRepository(
         )
     }
 
-    fun getSampleStreams(): List<LiveStreamRoom> {
-        val now = System.currentTimeMillis()
-        return listOf(
-            LiveStreamRoom(
-                id = "stream_1",
-                title = "أجمل سهرة طرب وعزف عود لايف 🎶",
-                hostName = "ليان الدوسري",
-                hostCountry = "المملكة العربية السعودية",
-                hostCountryCode = "SA",
-                viewersCount = 1420,
-                category = "Music",
-                isVip = false,
-                diamondsReceived = 18450,
-                imageResId = com.example.R.drawable.img_live_model_1,
-                agencyName = "وكالة النجوم الدولية",
-                isAgencyStream = true,
-                previewClipSeconds = 4,
-                previewClipTitle = "عزف عود رومانسي مباشر 🎶",
-                previewBadge = "وكالة النجوم 💎",
-                startedAt = now - (35 * 60 * 1000L + 18 * 1000L) // 35m 18s ago
-            ),
-            LiveStreamRoom(
-                id = "stream_2",
-                title = "دردشة وتعارف وسوالف ممتعة مع الأصدقاء 🍷",
-                hostName = "ريناد الحسيني",
-                hostCountry = "الإمارات",
-                hostCountryCode = "AE",
-                viewersCount = 1890,
-                category = "Just Chatting",
-                isVip = true,
-                diamondsReceived = 29200,
-                imageResId = com.example.R.drawable.img_live_model_2,
-                agencyName = "وكالة روتانا الذهبية",
-                isAgencyStream = true,
-                previewClipSeconds = 4,
-                previewClipTitle = "أجواء تعارف وتحديات ممتعة ✨",
-                previewBadge = "وكالة روتانا 👑",
-                startedAt = now - (1 * 3600 * 1000L + 14 * 60 * 1000L + 42 * 1000L) // 1h 14m ago
-            ),
-            LiveStreamRoom(
-                id = "stream_3",
-                title = "بطولة وتحدي جيمنج لايف PUBG & Warzone 🎮🔥",
-                hostName = "سامر إكس جيمر",
-                hostCountry = "الكويت",
-                hostCountryCode = "KW",
-                viewersCount = 3120,
-                category = "Gaming",
-                isVip = true,
-                diamondsReceived = 42800,
-                imageResId = com.example.R.drawable.stream_hero_bg,
-                agencyName = "وكالة إي سبورتس برو",
-                isAgencyStream = true,
-                previewClipSeconds = 4,
-                previewClipTitle = "مواجهات حاسمة واحترافية لايف 🎮",
-                previewBadge = "وكالة الألعاب 🎮",
-                startedAt = now - (52 * 60 * 1000L + 5 * 1000L) // 52m ago
-            ),
-            LiveStreamRoom(
-                id = "stream_4",
-                title = "جلسة سهر وتحديات وأجواء ساحرة ✨",
-                hostName = "نور الشام",
-                hostCountry = "لبنان",
-                hostCountryCode = "LB",
-                viewersCount = 2450,
-                category = "Challenges & PK",
-                isVip = true,
-                diamondsReceived = 38500,
-                imageResId = com.example.R.drawable.img_live_model_3,
-                agencyName = "وكالة القمة الملكية",
-                isAgencyStream = true,
-                previewClipSeconds = 4,
-                previewClipTitle = "تحدي الهدايا الأكبر مباشرة 🎁",
-                previewBadge = "وكالة القمة 🌟",
-                startedAt = now - (18 * 60 * 1000L + 30 * 1000L) // 18m ago
-            ),
-            LiveStreamRoom(
-                id = "stream_5",
-                title = "ليالي بيروت الموسيقية لايف 🎷",
-                hostName = "كارمن سلوم",
-                hostCountry = "الإمارات",
-                hostCountryCode = "AE",
-                viewersCount = 980,
-                category = "Music",
-                isVip = false,
-                diamondsReceived = 12300,
-                imageResId = com.example.R.drawable.stream_hero_bg,
-                agencyName = "وكالة VIP لايف",
-                isAgencyStream = true,
-                previewClipSeconds = 4,
-                previewClipTitle = "موسيقى وإضاءات ساحرة 🎷",
-                previewBadge = "وكالة VIP 💎",
-                startedAt = now - (7 * 60 * 1000L + 12 * 1000L) // 7m ago
-            ),
-            LiveStreamRoom(
-                id = "stream_6",
-                title = "فلوج ويوميات من استوديو التصميم 🎨",
-                hostName = "ماجد الغامدي",
-                hostCountry = "المملكة العربية السعودية",
-                hostCountryCode = "SA",
-                viewersCount = 840,
-                category = "Lifestyle",
-                isVip = false,
-                diamondsReceived = 9200,
-                imageResId = com.example.R.drawable.img_live_model_1,
-                agencyName = "وكالة المبدعين العرب",
-                isAgencyStream = true,
-                previewClipSeconds = 4,
-                previewClipTitle = "إلهام وتصميم مباشر 🎨",
-                previewBadge = "وكالة المبدعين ✨",
-                startedAt = now - (3 * 60 * 1000L + 45 * 1000L) // 3m 45s ago
-            )
-        )
-    }
-
-    fun getSampleMatchCandidates(): List<MatchCandidate> {
-        return listOf(
-            MatchCandidate(
-                id = "cand_1",
-                name = "سارة العتيبي",
-                age = 23,
-                country = "المملكة العربية السعودية",
-                countryCode = "SA",
-                gender = "FEMALE",
-                language = "العربية والإنجليزية",
-                bio = "مهتمة بالفن التشكيلي، القهوة المختصة، وتبادل الثقافات 🎨☕",
-                interests = listOf("فنون", "سفر", "بودكاست"),
-                imageResId = com.example.R.drawable.img_live_model_1
-            ),
-            MatchCandidate(
-                id = "cand_2",
-                name = "Lucas Martin",
-                age = 25,
-                country = "فرنسا",
-                countryCode = "FR",
-                gender = "MALE",
-                language = "French & English",
-                bio = "Photographer & digital nomad. Exploring world cultures! 📸",
-                interests = listOf("تصوير", "مغامرات", "لغات"),
-                imageResId = null
-            ),
-            MatchCandidate(
-                id = "cand_3",
-                name = "ريم التميمي",
-                age = 22,
-                country = "الكويت",
-                countryCode = "KW",
-                gender = "FEMALE",
-                language = "العربية",
-                bio = "أحب الكتب والموسيقى الهادئة. نبحث عن أصدقاء حقيقيين ✨",
-                interests = listOf("موسيقى", "قراءة", "شعر"),
-                imageResId = com.example.R.drawable.img_live_model_2
-            ),
-            MatchCandidate(
-                id = "cand_4",
-                name = "Sofia Rossi",
-                age = 24,
-                country = "إيطاليا",
-                countryCode = "IT",
-                gender = "FEMALE",
-                language = "Italian & English",
-                bio = "Architect and foodie from Milan. Ciao! 🍕",
-                interests = listOf("تصميم", "طبخ", "تاريخ"),
-                imageResId = com.example.R.drawable.img_live_model_3
-            )
-        )
-    }
-
-    suspend fun submitUserProfileReport(report: com.example.data.model.UserProfileReport): Result<Boolean> {
+    suspend fun submitUserProfileReport(report: UserProfileReport): Result<Boolean> {
+        val api = platformApi
+        val bearer = getBearerHeader()
+        if (api != null && bearer != null) {
+            runCatching {
+                api.createReport(
+                    bearer,
+                    CreateReportRequestDto(
+                        reportType = "USER_PROFILE",
+                        targetUserId = report.targetUserId,
+                        reason = report.reason,
+                        details = report.details
+                    )
+                )
+            }
+        }
         return firestoreChatService.submitUserProfileReport(report)
     }
+
+    // ==========================================================
+    // Phase D: LiveKit Broadcast Rooms & Matchmaking Queue
+    // ==========================================================
+
+    fun LiveStreamDto.toRoomModel(): LiveStreamRoom {
+        return LiveStreamRoom(
+            id = id,
+            title = title,
+            hostName = hostName,
+            hostCountry = hostCountry.ifBlank { "العالم 🌐" },
+            hostCountryCode = hostCountryCode.ifBlank { "SA" },
+            viewersCount = viewersCount,
+            category = category.ifBlank { "تعارف وسوالف" },
+            isVip = isVip,
+            diamondsReceived = diamondsReceived,
+            agencyName = agencyName,
+            isAgencyStream = isAgencyStream,
+            startedAt = if (startedAtMs > 0L) startedAtMs else System.currentTimeMillis(),
+            hostUid = hostUid,
+            roomName = roomName
+        )
+    }
+
+    suspend fun fetchLiveStreams(category: String? = null): Result<List<LiveStreamRoom>> {
+        val api = platformApi ?: return Result.success(emptyList())
+        val bearer = getBearerHeader() ?: return Result.success(emptyList())
+        return try {
+            val res = api.listLiveStreams(bearer, category)
+            if (res.isSuccessful && res.body() != null) {
+                Result.success(res.body()!!.streams.map { it.toRoomModel() })
+            } else {
+                Result.failure(IllegalStateException(BackendPlatformApi.extractErrorMessage(res, "تعذر جلب البثوث المباشرة")))
+            }
+        } catch (t: Throwable) {
+            Result.failure(t)
+        }
+    }
+
+    suspend fun startLiveBroadcast(
+        title: String,
+        category: String,
+        hostName: String,
+        hostCountry: String,
+        hostCountryCode: String
+    ): Result<StreamSessionResponseDto> {
+        val api = platformApi ?: return Result.failure(IllegalStateException("خادم البث غير مهيأ"))
+        val bearer = getBearerHeader() ?: return Result.failure(IllegalStateException("مطلوب تسجيل الدخول"))
+        return try {
+            val res = api.startLiveStream(
+                bearer,
+                StartStreamRequestDto(
+                    title = title,
+                    category = category,
+                    hostName = hostName,
+                    hostCountry = hostCountry,
+                    hostCountryCode = hostCountryCode
+                )
+            )
+            if (res.isSuccessful && res.body() != null) Result.success(res.body()!!)
+            else Result.failure(IllegalStateException(BackendPlatformApi.extractErrorMessage(res, "تعذر بدء البث المباشر")))
+        } catch (t: Throwable) {
+            Result.failure(t)
+        }
+    }
+
+    suspend fun joinLiveBroadcast(streamId: String): Result<StreamSessionResponseDto> {
+        val api = platformApi ?: return Result.failure(IllegalStateException("خادم البث غير مهيأ"))
+        val bearer = getBearerHeader() ?: return Result.failure(IllegalStateException("مطلوب تسجيل الدخول"))
+        return try {
+            val res = api.joinLiveStream(bearer, streamId)
+            if (res.isSuccessful && res.body() != null) Result.success(res.body()!!)
+            else Result.failure(IllegalStateException(BackendPlatformApi.extractErrorMessage(res, "تعذر الانضمام للبث")))
+        } catch (t: Throwable) {
+            Result.failure(t)
+        }
+    }
+
+    suspend fun leaveLiveBroadcast(streamId: String) {
+        val api = platformApi ?: return
+        val bearer = getBearerHeader() ?: return
+        runCatching { api.leaveLiveStream(bearer, streamId) }
+    }
+
+    suspend fun endLiveBroadcast(streamId: String) {
+        val api = platformApi ?: return
+        val bearer = getBearerHeader() ?: return
+        runCatching { api.endLiveStream(bearer, streamId) }
+    }
+
+    suspend fun joinMatchQueue(
+        displayName: String,
+        country: String,
+        countryCode: String,
+        userGender: String,
+        bio: String,
+        chatType: String,
+        genderFilter: String,
+        countryFilter: String
+    ): Result<MatchJoinPollResponseDto> {
+        val api = platformApi ?: return Result.failure(IllegalStateException("خادم المطابقة غير مهيأ"))
+        val bearer = getBearerHeader() ?: return Result.failure(IllegalStateException("مطلوب تسجيل الدخول"))
+        return try {
+            val res = api.joinMatchQueue(
+                bearer,
+                JoinMatchRequestDto(
+                    displayName = displayName,
+                    country = country,
+                    countryCode = countryCode,
+                    userGender = userGender,
+                    bio = bio,
+                    chatType = chatType,
+                    genderFilter = genderFilter,
+                    countryFilter = countryFilter
+                )
+            )
+            if (res.isSuccessful && res.body() != null) {
+                val body = res.body()!!
+                if (body.wallet != null) {
+                    applyAuthoritativeSummary(wallet = body.wallet)
+                    refreshWalletFromBackend()
+                }
+                Result.success(body)
+            } else {
+                Result.failure(IllegalStateException(BackendPlatformApi.extractErrorMessage(res, "تعذر الانضمام لطابور المطابقة")))
+            }
+        } catch (t: Throwable) {
+            Result.failure(t)
+        }
+    }
+
+    suspend fun pollMatchQueue(): Result<MatchJoinPollResponseDto> {
+        val api = platformApi ?: return Result.failure(IllegalStateException("خادم المطابقة غير مهيأ"))
+        val bearer = getBearerHeader() ?: return Result.failure(IllegalStateException("مطلوب تسجيل الدخول"))
+        return try {
+            val res = api.pollMatchQueue(bearer)
+            if (res.isSuccessful && res.body() != null) {
+                val body = res.body()!!
+                if (body.wallet != null) {
+                    applyAuthoritativeSummary(wallet = body.wallet)
+                    refreshWalletFromBackend()
+                }
+                Result.success(body)
+            } else {
+                Result.failure(IllegalStateException(BackendPlatformApi.extractErrorMessage(res, "تعذر متابعة طابور المطابقة")))
+            }
+        } catch (t: Throwable) {
+            Result.failure(t)
+        }
+    }
+
+    suspend fun leaveMatchQueue(matchId: String? = null) {
+        val api = platformApi ?: return
+        val bearer = getBearerHeader() ?: return
+        runCatching { api.leaveMatchQueue(bearer, LeaveMatchRequestDto(matchId)) }
+    }
+
+    // ==========================================================
+    // Phase E: Firestore Friends, Privacy & Private Chat
+    // ==========================================================
+
+    fun observeFirestoreBlockedUsers(uid: String): Flow<Set<String>> =
+        firestoreChatService.observeBlockedUsers(uid)
+
+    fun observeFriends(uid: String): Flow<List<com.example.data.model.FriendItem>> =
+        firestoreChatService.observeFriends(uid)
+
+    fun observePrivacySettings(uid: String): Flow<FirestoreChatService.PrivacySettingsSnapshot?> =
+        firestoreChatService.observePrivacySettings(uid)
+
+    suspend fun updatePrivacySettings(
+        uid: String,
+        profileVisibility: String,
+        directMessagePermission: String,
+        showOnlineStatus: Boolean,
+        hideLocationInMatch: Boolean
+    ): Result<Unit> = firestoreChatService.updatePrivacySettings(
+        uid = uid,
+        profileVisibility = profileVisibility,
+        directMessagePermission = directMessagePermission,
+        showOnlineStatus = showOnlineStatus,
+        hideLocationInMatch = hideLocationInMatch
+    )
+
+    suspend fun sendFriendRequest(
+        targetUid: String,
+        targetName: String,
+        targetCountry: String,
+        myName: String,
+        myCountry: String
+    ): Result<Unit> = firestoreChatService.sendFriendRequest(
+        targetUid = targetUid,
+        targetName = targetName,
+        targetCountry = targetCountry,
+        myName = myName,
+        myCountry = myCountry
+    )
+
+    suspend fun acceptFriendRequest(
+        targetUid: String,
+        myName: String,
+        myCountry: String
+    ): Result<Unit> = firestoreChatService.acceptFriendRequest(targetUid, myName, myCountry)
+
+    suspend fun rejectOrUnfriend(targetUid: String): Result<Unit> =
+        firestoreChatService.rejectOrUnfriend(targetUid)
+
+    fun observePrivateChatMessages(
+        myUid: String,
+        friendUid: String
+    ): Flow<List<com.example.data.model.PrivateChatMessage>> =
+        firestoreChatService.observePrivateChatMessages(myUid, friendUid)
+
+    suspend fun canSendDirectMessage(
+        targetUid: String,
+        isAcceptedFriend: Boolean,
+        isSenderVerified: Boolean
+    ): Result<Unit> = firestoreChatService.canSendDirectMessage(
+        targetUid = targetUid,
+        isAcceptedFriend = isAcceptedFriend,
+        isSenderVerified = isSenderVerified
+    )
+
+    suspend fun sendPrivateMessage(
+        friendUid: String,
+        message: com.example.data.model.PrivateChatMessage,
+        summaryPreview: String
+    ): Result<com.example.data.model.PrivateChatMessage> =
+        firestoreChatService.sendPrivateMessage(friendUid, message, summaryPreview)
+
+    suspend fun markPrivateMediaUnlocked(friendUid: String, messageId: String): Result<Unit> =
+        firestoreChatService.markPrivateMediaUnlocked(friendUid, messageId)
+
+    suspend fun updatePrivateMessageTranslation(friendUid: String, messageId: String, translatedText: String) =
+        firestoreChatService.updatePrivateMessageTranslation(friendUid, messageId, translatedText)
+
+    suspend fun clearOwnPrivateChatMessages(friendUid: String) =
+        firestoreChatService.clearOwnPrivateChatMessages(friendUid)
 }

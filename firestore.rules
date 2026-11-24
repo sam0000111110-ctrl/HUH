@@ -1,0 +1,247 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() && (
+        ('admin' in request.auth.token && request.auth.token.admin == true) ||
+        ('role' in request.auth.token && request.auth.token.role == 'admin') ||
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+         'isAdmin' in get(/databases/$(database)/documents/users/$(request.auth.uid)).data &&
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.isAdmin == true)
+      );
+    }
+
+    function isSafeUserSelfCreate(data, userId) {
+      return data.uid == userId &&
+        data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 80 &&
+        (!('isAdmin' in data) || data.isAdmin == false) &&
+        (!('isAgent' in data) || data.isAgent == false) &&
+        (!('isHost' in data) || data.isHost == false) &&
+        (!('ageVerified' in data) || data.ageVerified == false) &&
+        (!('ageVerificationStatus' in data) || data.ageVerificationStatus in ['UNVERIFIED', 'PENDING_REVIEW']) &&
+        (!('pointsBalance' in data) || data.pointsBalance == 0) &&
+        (!('hostEarningsCoins' in data) || data.hostEarningsCoins == 0) &&
+        (!('subAgentsEarningsCoins' in data) || data.subAgentsEarningsCoins == 0) &&
+        data.createdAt is timestamp && data.createdAt <= request.time &&
+        data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isSafeUserSelfUpdate() {
+      let restrictedFields = [
+        'uid',
+        'isAdmin',
+        'isAgent',
+        'isHost',
+        'hostStatus',
+        'ageVerified',
+        'ageVerificationStatus',
+        'agentCommissionPercent',
+        'hostCommissionPercent',
+        'pointsBalance',
+        'totalAccumulatedPoints',
+        'totalPointsSpent',
+        'hostEarningsCoins',
+        'subAgentsEarningsCoins',
+        'subAgentsCount',
+        'createdAt'
+      ];
+      return !request.resource.data.diff(resource.data).affectedKeys().hasAny(restrictedFields) &&
+        request.resource.data.updatedAt is timestamp &&
+        request.resource.data.updatedAt <= request.time;
+    }
+
+    // Users & user-scoped subcollections
+    match /users/{userId} {
+      allow get: if isOwner(userId) || isAdmin() || (
+        isAuthenticated() && resource.data.profileVisibility != 'PRIVATE_HIDDEN'
+      );
+      allow list: if isAdmin() || (
+        isAuthenticated() && resource.data.profileVisibility == 'PUBLIC'
+      );
+      allow create: if isOwner(userId) && isSafeUserSelfCreate(request.resource.data, userId);
+      allow update: if isAdmin() || (isOwner(userId) && isSafeUserSelfUpdate());
+      allow delete: if isOwner(userId) || isAdmin();
+
+      match /private_settings/{docId} {
+        allow read, write: if isOwner(userId) || isAdmin();
+      }
+
+      match /blocks/{blockedUid} {
+        allow read, write: if isOwner(userId) || isAdmin();
+      }
+
+      match /badges/{badgeId} {
+        allow read: if isAuthenticated();
+        allow write: if isOwner(userId) || isAdmin();
+      }
+
+      match /activity/{activityId} {
+        allow read: if isAuthenticated();
+        allow write: if isOwner(userId) || isAdmin();
+      }
+
+      match /friends/{friendId} {
+        allow list: if isOwner(userId) || isAdmin();
+        allow get: if isOwner(userId) || (isAuthenticated() && request.auth.uid == friendId) || isAdmin();
+        allow create: if isAuthenticated() && (
+          isOwner(userId) || request.auth.uid == friendId
+        ) && request.resource.data.status in ['PENDING_INCOMING', 'PENDING_OUTGOING', 'ACCEPTED', 'BLOCKED'];
+        allow update, delete: if isOwner(userId) || (isAuthenticated() && request.auth.uid == friendId) || isAdmin();
+      }
+    }
+
+    // Random Match Rooms & Messages
+    match /matches/{matchId} {
+      allow read: if isAuthenticated() && (request.auth.uid in resource.data.participantIds || isAdmin());
+      allow create: if isAuthenticated() &&
+        request.resource.data.participantIds is list &&
+        request.auth.uid in request.resource.data.participantIds &&
+        request.resource.data.createdAt is timestamp &&
+        request.resource.data.createdAt <= request.time;
+      allow update: if isAuthenticated() && (request.auth.uid in resource.data.participantIds || isAdmin());
+      allow delete: if isAdmin();
+
+      match /messages/{messageId} {
+        allow read: if isAuthenticated() && (
+          request.auth.uid in get(/databases/$(database)/documents/matches/$(matchId)).data.participantIds ||
+          isAdmin()
+        );
+        allow create: if isAuthenticated() &&
+          request.resource.data.senderId == request.auth.uid &&
+          request.resource.data.text is string &&
+          request.resource.data.text.size() >= 1 &&
+          request.resource.data.text.size() <= 2000 &&
+          request.auth.uid in get(/databases/$(database)/documents/matches/$(matchId)).data.participantIds;
+        allow update, delete: if isAdmin();
+      }
+    }
+
+    // 1-on-1 Private Chats
+    match /private_chats/{chatId}/messages/{messageId} {
+      allow read: if isAuthenticated() && (request.auth.uid in resource.data.participantIds || isAdmin());
+      allow create: if isAuthenticated() &&
+        request.resource.data.senderId == request.auth.uid &&
+        request.resource.data.participantIds is list &&
+        request.auth.uid in request.resource.data.participantIds &&
+        request.resource.data.recipientId is string &&
+        request.resource.data.recipientId in request.resource.data.participantIds;
+      allow update: if isAuthenticated() &&
+        request.auth.uid in resource.data.participantIds &&
+        !request.resource.data.diff(resource.data).affectedKeys().hasAny(['senderId', 'recipientId', 'participantIds', 'timestamp']);
+      allow delete: if isAuthenticated() && (request.auth.uid == resource.data.senderId || isAdmin());
+    }
+
+    // 1-on-1 Call Signaling
+    match /calls/{callId} {
+      allow read: if isAuthenticated() && (
+        request.auth.uid == resource.data.callerId ||
+        request.auth.uid == resource.data.calleeId ||
+        isAdmin()
+      );
+      allow create: if isAuthenticated() &&
+        request.resource.data.callerId == request.auth.uid &&
+        request.resource.data.calleeId is string &&
+        request.resource.data.calleeId != request.auth.uid &&
+        request.resource.data.callType in ['AUDIO', 'VIDEO'];
+      allow update: if isAuthenticated() && (
+        request.auth.uid == resource.data.callerId ||
+        request.auth.uid == resource.data.calleeId ||
+        isAdmin()
+      ) && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['callerId', 'calleeId', 'callId', 'roomName']);
+      allow delete: if isAdmin();
+    }
+
+    // Live Streams & Chat
+    match /streams/{streamId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() &&
+        request.resource.data.hostId == request.auth.uid &&
+        request.resource.data.title is string &&
+        request.resource.data.title.size() >= 1 &&
+        request.resource.data.title.size() <= 140;
+      allow update: if isAuthenticated() && (resource.data.hostId == request.auth.uid || isAdmin());
+      allow delete: if isAuthenticated() && (resource.data.hostId == request.auth.uid || isAdmin());
+
+      match /messages/{messageId} {
+        allow read: if isAuthenticated();
+        allow create: if isAuthenticated() &&
+          request.resource.data.senderId == request.auth.uid &&
+          request.resource.data.originalText is string &&
+          request.resource.data.originalText.size() >= 1 &&
+          request.resource.data.originalText.size() <= 1000;
+        allow delete: if isAuthenticated() && (
+          get(/databases/$(database)/documents/streams/$(streamId)).data.hostId == request.auth.uid ||
+          isAdmin()
+        );
+      }
+    }
+
+    // UGC Moderation Reports
+    match /reports/{reportId} {
+      allow read: if isAuthenticated() && (resource.data.reporterId == request.auth.uid || isAdmin());
+      allow create: if isAuthenticated() &&
+        request.resource.data.reporterId == request.auth.uid &&
+        request.resource.data.status == 'PENDING_REVIEW' &&
+        request.resource.data.reason is string &&
+        request.resource.data.reason.size() >= 1 &&
+        request.resource.data.reason.size() <= 500;
+      allow update, delete: if isAdmin();
+    }
+
+    // Mandatory +18 Age Verification & Legal Consent Queue
+    match /age_verifications/{userId} {
+      allow read: if isOwner(userId) || isAdmin();
+      allow create: if isOwner(userId) &&
+        request.resource.data.userId == request.auth.uid &&
+        request.resource.data.status == 'PENDING_REVIEW' &&
+        request.resource.data.dob is string &&
+        request.resource.data.ageYears is int &&
+        request.resource.data.ageYears >= 18 &&
+        request.resource.data.acceptedTermsAt is timestamp &&
+        request.resource.data.acceptedTermsAt <= request.time &&
+        request.resource.data.acceptedPrivacyAt is timestamp &&
+        request.resource.data.acceptedPrivacyAt <= request.time &&
+        request.resource.data.submittedAt is timestamp &&
+        request.resource.data.submittedAt <= request.time;
+      allow update: if isAdmin() || (
+        isOwner(userId) &&
+        request.resource.data.userId == request.auth.uid &&
+        request.resource.data.status == 'PENDING_REVIEW' &&
+        request.resource.data.ageYears is int &&
+        request.resource.data.ageYears >= 18 &&
+        request.resource.data.submittedAt is timestamp &&
+        request.resource.data.submittedAt <= request.time
+      );
+      allow delete: if isOwner(userId) || isAdmin();
+    }
+
+    // Payout Requests
+    match /payout_requests/{requestId} {
+      allow read: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isAuthenticated() &&
+        request.resource.data.userId == request.auth.uid &&
+        request.resource.data.status == 'PENDING_ADMIN_REVIEW' &&
+        request.resource.data.coinsRequested is int &&
+        request.resource.data.coinsRequested > 0 &&
+        request.resource.data.createdAt is timestamp &&
+        request.resource.data.createdAt <= request.time;
+      allow update, delete: if isAdmin();
+    }
+
+    // Agencies Directory
+    match /agencies/{agencyId} {
+      allow read: if isAuthenticated();
+      allow write: if isAdmin();
+    }
+  }
+}

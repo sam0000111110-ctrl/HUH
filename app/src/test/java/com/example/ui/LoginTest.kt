@@ -1,31 +1,37 @@
 package com.example.ui
 
-import androidx.test.ext.junit.runners.AndroidJUnit4
-import androidx.test.core.app.ActivityScenario
-import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
-import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
-import androidx.compose.ui.test.performTextClearance
-import androidx.compose.ui.test.performTextInput
-import com.example.MainActivity
+import androidx.compose.ui.test.performScrollTo
+import com.example.ui.screens.LoginScreen
+import com.example.ui.theme.AyerTheme
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
 
-@RunWith(AndroidJUnit4::class)
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [34])
 class LoginTest {
     @get:Rule
-    val composeTestRule = createAndroidComposeRule<MainActivity>()
+    val composeTestRule = createComposeRule()
 
     @Test
-    fun testLoginFlow() {
-        composeTestRule.onNodeWithTag("login_email_input").performTextClearance()
-        composeTestRule.onNodeWithTag("login_email_input").performTextInput("test@test.com")
-        composeTestRule.onNodeWithTag("login_password_input").performTextClearance()
-        composeTestRule.onNodeWithTag("login_password_input").performTextInput("123456")
-        composeTestRule.onNodeWithTag("login_button").performClick()
-        
+    fun loginScreenRendersGoogleSignInAndLegalPolicies() {
+        composeTestRule.setContent {
+            AyerTheme {
+                LoginScreen(onAuthSuccess = {})
+            }
+        }
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("google_sign_in_button").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("privacy_policy_button").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("terms_of_service_button").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("privacy_policy_button").performClick()
         composeTestRule.waitForIdle()
     }
 }
+

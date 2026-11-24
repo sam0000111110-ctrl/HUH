@@ -1,0 +1,198 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Authenticated user account, profile settings, privacy controls, and server-managed role/verification flags.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "displayName": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
+        "photoUrl": { "type": "string" },
+        "country": { "type": "string" },
+        "countryCode": { "type": "string" },
+        "gender": { "type": "string" },
+        "bio": { "type": "string" },
+        "dob": { "type": "string" },
+        "ageVerified": { "type": "boolean" },
+        "ageVerificationStatus": { "type": "string", "enum": ["UNVERIFIED", "PENDING_REVIEW", "VERIFIED", "REJECTED_UNDERAGE"] },
+        "acceptedTermsAt": { "type": "string", "format": "date-time" },
+        "acceptedPrivacyAt": { "type": "string", "format": "date-time" },
+        "profileVisibility": { "type": "string", "enum": ["PUBLIC", "FRIENDS_ONLY", "PRIVATE_HIDDEN"] },
+        "directMessagePermission": { "type": "string", "enum": ["EVERYONE", "FRIENDS_ONLY", "VERIFIED_VIP_ONLY", "NOBODY"] },
+        "showOnlineStatus": { "type": "boolean" },
+        "hideLocationInMatch": { "type": "boolean" },
+        "isHost": { "type": "boolean" },
+        "hostStatus": { "type": "string" },
+        "isAgent": { "type": "boolean" },
+        "isAdmin": { "type": "boolean" },
+        "agentCommissionPercent": { "type": "integer" },
+        "hostCommissionPercent": { "type": "integer" },
+        "pointsBalance": { "type": "integer" },
+        "referralCode": { "type": "string" },
+        "agencyId": { "type": "string" },
+        "agencyName": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "displayName", "ageVerified", "ageVerificationStatus", "profileVisibility", "directMessagePermission", "createdAt", "updatedAt"]
+    },
+    "MatchRoom": {
+      "title": "MatchRoom",
+      "description": "Real-time random match room metadata linking two authenticated participants.",
+      "type": "object",
+      "properties": {
+        "participantIds": { "type": "array", "items": { "type": "string" } },
+        "chatType": { "type": "string", "enum": ["VIDEO", "VOICE", "TEXT"] },
+        "status": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["participantIds", "chatType", "status", "createdAt"]
+    },
+    "MatchMessage": {
+      "title": "MatchMessage",
+      "description": "Message inside a random match room.",
+      "type": "object",
+      "properties": {
+        "senderId": { "type": "string" },
+        "senderName": { "type": "string" },
+        "text": { "type": "string" },
+        "translatedText": { "type": "string" },
+        "timestamp": { "type": "integer" },
+        "status": { "type": "string" }
+      },
+      "required": ["senderId", "senderName", "text", "timestamp"]
+    },
+    "PrivateChatMessage": {
+      "title": "PrivateChatMessage",
+      "description": "1-on-1 private chat message between two friends.",
+      "type": "object",
+      "properties": {
+        "senderId": { "type": "string" },
+        "recipientId": { "type": "string" },
+        "participantIds": { "type": "array", "items": { "type": "string" } },
+        "text": { "type": "string" },
+        "textColorHex": { "type": "string" },
+        "bgColorHex": { "type": "string" },
+        "mediaUrl": { "type": "string" },
+        "mediaPriceCoins": { "type": "integer" },
+        "isUnlocked": { "type": "boolean" },
+        "voiceUrl": { "type": "string" },
+        "voiceDurationSeconds": { "type": "integer" },
+        "callLogRecordId": { "type": "string" },
+        "callLogIsVideo": { "type": "boolean" },
+        "callLogStatus": { "type": "string" },
+        "callLogDurationSeconds": { "type": "integer" },
+        "timestamp": { "type": "integer" }
+      },
+      "required": ["senderId", "recipientId", "participantIds", "timestamp"]
+    },
+    "CallSignaling": {
+      "title": "CallSignaling",
+      "description": "1-on-1 call signaling document.",
+      "type": "object",
+      "properties": {
+        "callId": { "type": "string" },
+        "roomName": { "type": "string" },
+        "callerId": { "type": "string" },
+        "callerName": { "type": "string" },
+        "calleeId": { "type": "string" },
+        "callType": { "type": "string", "enum": ["AUDIO", "VIDEO"] },
+        "status": { "type": "string" },
+        "lastActorId": { "type": "string" },
+        "updatedAt": { "type": "integer" }
+      },
+      "required": ["callId", "callerId", "calleeId", "callType", "status", "updatedAt"]
+    },
+    "LiveStream": {
+      "title": "LiveStream",
+      "description": "LiveKit-backed broadcast room metadata.",
+      "type": "object",
+      "properties": {
+        "hostId": { "type": "string" },
+        "hostName": { "type": "string" },
+        "title": { "type": "string" },
+        "hostCountry": { "type": "string" },
+        "hostCountryCode": { "type": "string" },
+        "category": { "type": "string" },
+        "roomName": { "type": "string" },
+        "status": { "type": "string", "enum": ["LIVE", "ENDED", "SUSPENDED"] },
+        "viewersCount": { "type": "integer" },
+        "diamondsReceived": { "type": "integer" },
+        "startedAt": { "type": "integer" },
+        "updatedAt": { "type": "integer" }
+      },
+      "required": ["hostId", "hostName", "title", "roomName", "status"]
+    },
+    "ModerationReport": {
+      "title": "ModerationReport",
+      "description": "UGC moderation report for streams, profiles, or messages.",
+      "type": "object",
+      "properties": {
+        "reporterId": { "type": "string" },
+        "reporterName": { "type": "string" },
+        "reportType": { "type": "string", "enum": ["LIVE_STREAM", "USER_PROFILE", "PRIVATE_CHAT"] },
+        "targetUserId": { "type": "string" },
+        "targetUserName": { "type": "string" },
+        "streamId": { "type": "string" },
+        "streamTitle": { "type": "string" },
+        "hostName": { "type": "string" },
+        "reason": { "type": "string" },
+        "details": { "type": "string" },
+        "status": { "type": "string", "enum": ["PENDING_REVIEW", "ACTION_TAKEN", "DISMISSED"] },
+        "timestamp": { "type": "integer" }
+      },
+      "required": ["reporterId", "reportType", "reason", "status", "timestamp"]
+    },
+    "AgeVerificationSubmission": {
+      "title": "AgeVerificationSubmission",
+      "description": "Mandatory +18 DOB and legal consent verification record.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "displayName": { "type": "string" },
+        "dob": { "type": "string" },
+        "ageYears": { "type": "integer" },
+        "acceptedTermsAt": { "type": "string", "format": "date-time" },
+        "acceptedPrivacyAt": { "type": "string", "format": "date-time" },
+        "status": { "type": "string", "enum": ["PENDING_REVIEW", "VERIFIED", "REJECTED_UNDERAGE"] },
+        "submittedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "dob", "ageYears", "acceptedTermsAt", "acceptedPrivacyAt", "status", "submittedAt"]
+    },
+    "PayoutRequest": {
+      "title": "PayoutRequest",
+      "description": "Host or Agency payout withdrawal request subject to admin review.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "userName": { "type": "string" },
+        "coinsRequested": { "type": "integer" },
+        "amountUsdCents": { "type": "integer" },
+        "payoutMethod": { "type": "string" },
+        "accountRefMasked": { "type": "string" },
+        "status": { "type": "string", "enum": ["PENDING_ADMIN_REVIEW", "APPROVED", "PAID", "REJECTED"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "coinsRequested", "status", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": { "schema": { "$ref": "#/entities/UserProfile" }, "description": "User profiles" },
+    "/users/{userId}/friends/{friendId}": { "description": "User friendships" },
+    "/users/{userId}/blocks/{blockedUid}": { "description": "Blocked user IDs" },
+    "/users/{userId}/private_settings/{docId}": { "description": "Security & session preferences" },
+    "/users/{userId}/badges/{badgeId}": { "description": "Earned user badges" },
+    "/users/{userId}/activity/{activityId}": { "description": "Recent user activity" },
+    "/matches/{matchId}": { "schema": { "$ref": "#/entities/MatchRoom" }, "description": "Match rooms" },
+    "/matches/{matchId}/messages/{messageId}": { "schema": { "$ref": "#/entities/MatchMessage" }, "description": "Match chat messages" },
+    "/private_chats/{chatId}/messages/{messageId}": { "schema": { "$ref": "#/entities/PrivateChatMessage" }, "description": "Private 1-on-1 chat messages" },
+    "/calls/{callId}": { "schema": { "$ref": "#/entities/CallSignaling" }, "description": "1-on-1 call signaling" },
+    "/streams/{streamId}": { "schema": { "$ref": "#/entities/LiveStream" }, "description": "Live broadcasts" },
+    "/streams/{streamId}/messages/{messageId}": { "description": "Live broadcast chat messages" },
+    "/reports/{reportId}": { "schema": { "$ref": "#/entities/ModerationReport" }, "description": "Moderation reports" },
+    "/age_verifications/{userId}": { "schema": { "$ref": "#/entities/AgeVerificationSubmission" }, "description": "+18 age verification queue" },
+    "/payout_requests/{requestId}": { "schema": { "$ref": "#/entities/PayoutRequest" }, "description": "Host/agency payout requests" }
+  }
+}

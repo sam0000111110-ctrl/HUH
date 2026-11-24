@@ -48,7 +48,9 @@ class CallGovernanceManager(
     companion object {
         private fun buildOptionalRemoteApi(): CallBackendApi? {
             val url = BuildConfig.CALL_BACKEND_URL.trim()
-            return if (url.startsWith("https://") || url.startsWith("http://")) {
+            val isAllowedScheme = url.startsWith("https://") ||
+                (BuildConfig.DEBUG && url.startsWith("http://"))
+            return if (isAllowedScheme) {
                 CallBackendApi.create(url)
             } else null
         }

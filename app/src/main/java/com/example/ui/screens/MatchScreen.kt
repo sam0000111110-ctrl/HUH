@@ -157,6 +157,10 @@ fun MatchScreen(
 ) {
     // Collect real-time messages from Firebase Firestore
     val firestoreMessages by viewModel.firestoreMatchMessages.collectAsStateWithLifecycle()
+    val queueSize by viewModel.matchQueueSize.collectAsStateWithLifecycle()
+    val waitSeconds by viewModel.matchWaitSeconds.collectAsStateWithLifecycle()
+    val livekitLocalTrack by viewModel.livekitLocalVideoTrack.collectAsStateWithLifecycle()
+    val livekitRemoteTrack by viewModel.livekitRemoteVideoTrack.collectAsStateWithLifecycle()
     val effectiveChatMessages = remember(firestoreMessages, chatMessages) {
         if (firestoreMessages.isNotEmpty()) {
             firestoreMessages.map { fMsg ->
@@ -194,6 +198,8 @@ fun MatchScreen(
                     selectedChatType = selectedChatType,
                     selectedGender = selectedGender,
                     selectedCountry = selectedCountry,
+                    queueSize = queueSize,
+                    waitSeconds = waitSeconds,
                     onCancel = { viewModel.endCurrentMatch() }
                 )
             }
@@ -209,6 +215,21 @@ fun MatchScreen(
                     chatType = matchingStatus.chatType,
                     chatMessages = effectiveChatMessages,
                     isTranslationEnabled = isTranslationEnabled,
+                    localVideoTrack = livekitLocalTrack,
+                    remoteVideoTrack = livekitRemoteTrack,
+                    liveKitEngine = viewModel.callLiveKitEngine,
+                    onToggleMute = { muted -> viewModel.setBroadcastMuted(muted) },
+                    onSwitchCamera = { front -> viewModel.switchBroadcastCamera(front) },
+                    onReportPartner = { reason ->
+                        viewModel.submitUserReport(
+                            targetUserId = matchingStatus.candidate.id,
+                            targetUserName = matchingStatus.candidate.name,
+                            reason = reason,
+                            details = "Reported from active random match"
+                        )
+                        viewModel.blockUser(matchingStatus.candidate.id)
+                        viewModel.skipCurrentMatch()
+                    },
                     onToggleTranslation = { viewModel.toggleTranslation() },
                     onSkip = { viewModel.skipCurrentMatch() },
                     onEnd = { viewModel.endCurrentMatch() },
@@ -604,8 +625,12 @@ fun IdleMatchingView(
     onNavigateToLiveStream: ((LiveStreamRoom) -> Unit)? = null
 ) {
     val matchCost = viewModel.calculateMatchCost()
-    val liveStreams by viewModel.liveStreams.collectAsState()
+    val liveStreams by viewModel.liveStreams.collectAsStateWithLifecycle()
     var showAgencyClipManager by remember { mutableStateOf(false) }
+
+    LaunchedEffect(Unit) {
+        viewModel.refreshLiveStreams()
+    }
 
     Column(
         modifier = Modifier
@@ -762,6 +787,8 @@ fun SearchingReal3DGlobeView(
     selectedChatType: MatchChatType,
     selectedGender: String,
     selectedCountry: String,
+    queueSize: Int = 1,
+    waitSeconds: Int = 0,
     onCancel: () -> Unit
 ) {
     val destinationCountry = remember(selectedCountry) {
@@ -898,7 +925,7 @@ fun SearchingReal3DGlobeView(
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = "فحص قنوات الاتصال المشفرة • خوارزمية مطابقة فورية",
+                        text = "طابور المطابقة الحقيقي • انتظار ${waitSeconds}ث • المتاحون الآن: ${queueSize.coerceAtLeast(1)}",
                         fontSize = 11.sp,
                         color = Color.Gray,
                         textAlign = TextAlign.Center
@@ -1159,6 +1186,12 @@ fun ActiveMatchSessionView(
     chatType: MatchChatType,
     chatMessages: List<StreamMessage>,
     isTranslationEnabled: Boolean,
+    localVideoTrack: io.livekit.android.room.track.VideoTrack? = null,
+    remoteVideoTrack: io.livekit.android.room.track.VideoTrack? = null,
+    liveKitEngine: com.example.calls.CallLiveKitEngine? = null,
+    onToggleMute: (Boolean) -> Unit = {},
+    onSwitchCamera: (Boolean) -> Unit = {},
+    onReportPartner: (String) -> Unit = {},
     onToggleTranslation: () -> Unit,
     onSkip: () -> Unit,
     onEnd: () -> Unit,
@@ -1171,6 +1204,12 @@ fun ActiveMatchSessionView(
                 candidate = candidate,
                 chatMessages = chatMessages,
                 isTranslationEnabled = isTranslationEnabled,
+                localVideoTrack = localVideoTrack,
+                remoteVideoTrack = remoteVideoTrack,
+                liveKitEngine = liveKitEngine,
+                onToggleMute = onToggleMute,
+                onSwitchCamera = onSwitchCamera,
+                onReportPartner = onReportPartner,
                 onToggleTranslation = onToggleTranslation,
                 onSkip = onSkip,
                 onEnd = onEnd,
@@ -1208,6 +1247,12 @@ fun ActiveMatchVideoContent(
     candidate: MatchCandidate,
     chatMessages: List<StreamMessage>,
     isTranslationEnabled: Boolean,
+    localVideoTrack: io.livekit.android.room.track.VideoTrack? = null,
+    remoteVideoTrack: io.livekit.android.room.track.VideoTrack? = null,
+    liveKitEngine: com.example.calls.CallLiveKitEngine? = null,
+    onToggleMute: (Boolean) -> Unit = {},
+    onSwitchCamera: (Boolean) -> Unit = {},
+    onReportPartner: (String) -> Unit = {},
     onToggleTranslation: () -> Unit,
     onSkip: () -> Unit,
     onEnd: () -> Unit,
@@ -1216,6 +1261,7 @@ fun ActiveMatchVideoContent(
 ) {
     var messageInput by remember { mutableStateOf("") }
     var isMuted by remember { mutableStateOf(false) }
+    var isFrontCamera by remember { mutableStateOf(true) }
 
     val videoChatListState = rememberLazyListState()
     val coroutineScope = rememberCoroutineScope()
@@ -1244,14 +1290,29 @@ fun ActiveMatchVideoContent(
         }
     }
 
-    Box(modifier = Modifier.fillMaxSize()) {
-        // Main Video Frame Simulation (Atmospheric stream room)
-        Image(
-            painter = painterResource(id = candidate.imageResId ?: R.drawable.stream_hero_bg),
-            contentDescription = "فيديو الطرف الآخر",
-            modifier = Modifier.fillMaxSize(),
-            contentScale = ContentScale.Crop
-        )
+    Box(modifier = Modifier.fillMaxSize().background(Color(0xFF0A0614))) {
+        // Real LiveKit Remote Partner Video Stream
+        if (remoteVideoTrack != null && liveKitEngine != null) {
+            LiveKitVideoRenderer(
+                videoTrack = remoteVideoTrack,
+                engine = liveKitEngine,
+                modifier = Modifier.fillMaxSize(),
+                isMirror = false
+            )
+        } else {
+            Column(
+                modifier = Modifier.align(Alignment.Center),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text(text = "🎥", fontSize = 42.sp)
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = "بانتظار بث فيديو ${candidate.name} عبر LiveKit...",
+                    color = Color.LightGray,
+                    fontSize = 13.sp
+                )
+            }
+        }
 
         // Gradient scrim for text readability
         Box(
@@ -1354,16 +1415,17 @@ fun ActiveMatchVideoContent(
                     }
                 }
 
-                // Report button
+                // Report & Block Partner button
                 IconButton(
-                    onClick = { /* Open Report Dialog */ },
+                    onClick = { onReportPartner("سلوك غير لائق أثناء المطابقة") },
                     modifier = Modifier
                         .size(36.dp)
                         .background(Color.Red.copy(alpha = 0.3f), CircleShape)
+                        .testTag("match_report_partner_button")
                 ) {
                     Icon(
                         imageVector = Icons.Default.Flag,
-                        contentDescription = "إبلاغ عن محتوى",
+                        contentDescription = "إبلاغ وحظر",
                         tint = Color.White,
                         modifier = Modifier.size(18.dp)
                     )
@@ -1381,6 +1443,14 @@ fun ActiveMatchVideoContent(
                 .border(1.5.dp, AyerPrimary, RoundedCornerShape(16.dp))
                 .background(Color(0xFF1E1035))
         ) {
+            if (localVideoTrack != null && liveKitEngine != null) {
+                LiveKitVideoRenderer(
+                    videoTrack = localVideoTrack,
+                    engine = liveKitEngine,
+                    modifier = Modifier.fillMaxSize(),
+                    isMirror = isFrontCamera
+                )
+            }
             Column(
                 modifier = Modifier
                     .fillMaxSize()
@@ -1393,12 +1463,14 @@ fun ActiveMatchVideoContent(
                     fontSize = 10.sp,
                     color = Color.LightGray
                 )
-                Icon(
-                    imageVector = Icons.Default.Videocam,
-                    contentDescription = null,
-                    tint = AyerCyan,
-                    modifier = Modifier.size(32.dp)
-                )
+                if (localVideoTrack == null) {
+                    Icon(
+                        imageVector = Icons.Default.Videocam,
+                        contentDescription = null,
+                        tint = AyerCyan,
+                        modifier = Modifier.size(32.dp)
+                    )
+                }
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceEvenly
@@ -1407,7 +1479,12 @@ fun ActiveMatchVideoContent(
                         imageVector = Icons.Default.Cameraswitch,
                         contentDescription = "تبديل الكاميرا",
                         tint = Color.White,
-                        modifier = Modifier.size(18.dp)
+                        modifier = Modifier
+                            .size(18.dp)
+                            .clickable {
+                                isFrontCamera = !isFrontCamera
+                                onSwitchCamera(isFrontCamera)
+                            }
                     )
                     Icon(
                         imageVector = if (isMuted) Icons.Default.MicOff else Icons.Default.Mic,
@@ -1415,7 +1492,10 @@ fun ActiveMatchVideoContent(
                         tint = if (isMuted) Color.Red else Color.White,
                         modifier = Modifier
                             .size(18.dp)
-                            .clickable { isMuted = !isMuted }
+                            .clickable {
+                                isMuted = !isMuted
+                                onToggleMute(isMuted)
+                            }
                     )
                 }
             }

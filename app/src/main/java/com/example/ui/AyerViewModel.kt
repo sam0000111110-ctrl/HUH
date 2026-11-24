@@ -1,12 +1,18 @@
 package com.example.ui
 
+import android.app.Activity
 import android.app.Application
+import android.os.Build
+import androidx.credentials.ClearCredentialStateRequest
+import androidx.credentials.CredentialManager
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.google.firebase.auth.FirebaseAuth
 import com.example.R
+import com.example.billing.PlayBillingManager
 import com.example.data.local.AyerDatabase
 import com.example.data.model.ActiveCallSession
+import com.example.data.model.AgeVerificationSubmissionDoc
 import com.example.data.model.AppNotification
 import com.example.data.model.CallQualityMode
 import com.example.data.model.CoinPackage
@@ -44,12 +50,18 @@ import com.example.calls.IncomingCallBus
 import com.example.calls.IncomingCallInvite
 import com.example.data.repository.AyerRepository
 import com.example.ui.locale.AppLanguage
+import com.example.util.AppPreferencesStore
 import com.example.util.AyerNotificationManager
+import com.example.util.authStateFlow
 import com.example.webrtc.WebRTCManager
 import org.webrtc.EglBase
 import org.webrtc.VideoTrack
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -59,6 +71,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
+import kotlinx.coroutines.withContext
 
 /**
  * Typealias providing direct compatibility for VideoCallViewModel
@@ -77,6 +90,7 @@ sealed class MatchingStatus {
 
 class AyerViewModel(application: Application) : AndroidViewModel(application) {
     private val repository: AyerRepository
+    private val preferencesStore = AppPreferencesStore(application)
 
     val userProfile: StateFlow<UserProfile?>
     val transactions: StateFlow<List<PointTransaction>>
@@ -86,34 +100,71 @@ class AyerViewModel(application: Application) : AndroidViewModel(application) {
     val engagementState: StateFlow<UserEngagementState>
     val dailyMissions: StateFlow<List<DailyMissionItem>>
     val flaggedStreamIds: StateFlow<Set<String>>
+    private val _firestoreBlockedUsers = MutableStateFlow<Set<String>>(emptySet())
+    val blockedUserIds: StateFlow<Set<String>>
+    private val _rawFriendsList = MutableStateFlow<List<FriendItem>>(emptyList())
+    val friendsList: StateFlow<List<FriendItem>>
+    private val _privateChatMessages = MutableStateFlow<Map<String, List<PrivateChatMessage>>>(emptyMap())
+    val privateChatMessages = _privateChatMessages.asStateFlow()
+    val subAgentsList: StateFlow<List<com.example.data.model.SubAgentItem>>
+    val myPayouts: StateFlow<List<com.example.data.remote.PayoutRequestDto>>
 
-    private val _currentMatchId = MutableStateFlow<String?>("match_demo_1")
+    private val aiTranslationService by lazy { com.example.ai.AiTranslationService() }
+
+    private val _adminAgeVerifications = MutableStateFlow<List<com.example.data.remote.AdminAgeVerificationItemDto>>(emptyList())
+    val adminAgeVerifications: StateFlow<List<com.example.data.remote.AdminAgeVerificationItemDto>> = _adminAgeVerifications.asStateFlow()
+
+    private val _adminPayouts = MutableStateFlow<List<com.example.data.remote.PayoutRequestDto>>(emptyList())
+    val adminPayouts: StateFlow<List<com.example.data.remote.PayoutRequestDto>> = _adminPayouts.asStateFlow()
+
+    private val _adminReports = MutableStateFlow<List<com.example.data.remote.ModerationReportDto>>(emptyList())
+    val adminReports: StateFlow<List<com.example.data.remote.ModerationReportDto>> = _adminReports.asStateFlow()
+
+    val playBillingManager: PlayBillingManager
+    val playProductPrices: StateFlow<Map<String, String>>
+    val isPlayBillingReady: StateFlow<Boolean>
+
+    private val _currentMatchId = MutableStateFlow<String?>(null)
     val currentMatchId: StateFlow<String?> = _currentMatchId.asStateFlow()
 
     private val _firestoreMatchMessages = MutableStateFlow<List<FirestoreRandomChatMessage>>(emptyList())
     val firestoreMatchMessages: StateFlow<List<FirestoreRandomChatMessage>> = _firestoreMatchMessages.asStateFlow()
     private var firestoreChatJob: Job? = null
+    private var privateChatJob: Job? = null
+    private var activePrivateChatFriendId: String? = null
+    private var authSessionSyncJob: Job? = null
+
+    private val _ageVerificationSubmission = MutableStateFlow<AgeVerificationSubmissionDoc?>(null)
+    val ageVerificationSubmission: StateFlow<AgeVerificationSubmissionDoc?> = _ageVerificationSubmission.asStateFlow()
+
+    private val _isSubmittingAgeVerification = MutableStateFlow(false)
+    val isSubmittingAgeVerification: StateFlow<Boolean> = _isSubmittingAgeVerification.asStateFlow()
+
+    private val _ageVerificationError = MutableStateFlow<String?>(null)
+    val ageVerificationError: StateFlow<String?> = _ageVerificationError.asStateFlow()
 
     // Hidden Secondary Profile State
     private val _activeSecondaryProfile = MutableStateFlow<SecondaryProfile?>(null)
     val activeSecondaryProfile = _activeSecondaryProfile.asStateFlow()
 
     // Account Security & Transparency State
-    private val _isTwoFactorAuthEnabled = MutableStateFlow(false)
+    private val _isTwoFactorAuthEnabled = MutableStateFlow(true)
     val isTwoFactorAuthEnabled: StateFlow<Boolean> = _isTwoFactorAuthEnabled.asStateFlow()
 
-    private val _lastLoginTimestamp = MutableStateFlow("اليوم، 04:35 م (2026-09-20)")
+    private val _lastLoginTimestamp = MutableStateFlow("غير مسجل")
     val lastLoginTimestamp: StateFlow<String> = _lastLoginTimestamp.asStateFlow()
 
-    private val _lastLoginIpAndDevice = MutableStateFlow("هاتف أندرويد • IP: 197.38.112.4 (القاهرة، مصر)")
+    private val _lastLoginIpAndDevice = MutableStateFlow(
+        "${Build.MANUFACTURER.orEmpty()} ${Build.MODEL.orEmpty()} • Android ${Build.VERSION.RELEASE.orEmpty()}".trim()
+    )
     val lastLoginIpAndDevice: StateFlow<String> = _lastLoginIpAndDevice.asStateFlow()
 
     fun setTwoFactorAuthEnabled(enabled: Boolean) {
         _isTwoFactorAuthEnabled.value = enabled
         _uiNotice.value = if (enabled) {
-            "تم تفعيل المصادقة الثنائية (2FA) بنجاح 🔒"
+            "حماية تسجيل الدخول عبر Google مفعلة 🔒"
         } else {
-            "تم إلغاء تفعيل المصادقة الثنائية"
+            "تم تحديث تفضيل تنبيهات الأمان"
         }
     }
 
@@ -127,15 +178,17 @@ class AyerViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setAppLanguage(language: AppLanguage) {
         _appLanguage.value = language
+        viewModelScope.launch { preferencesStore.setAppLanguage(language) }
     }
 
     fun setDarkMode(enabled: Boolean?) {
         _isDarkTheme.value = enabled
+        viewModelScope.launch { preferencesStore.setDarkTheme(enabled) }
     }
 
     fun toggleTheme(systemIsDark: Boolean = false) {
         val currentEffective = _isDarkTheme.value ?: systemIsDark
-        _isDarkTheme.value = !currentEffective
+        setDarkMode(!currentEffective)
     }
 
     // 1-on-1 Call Session State, Governance, LiveKit SFU & Audio Routing
@@ -154,7 +207,7 @@ class AyerViewModel(application: Application) : AndroidViewModel(application) {
 
     val callLiveKitEngine: CallLiveKitEngine by lazy { CallLiveKitEngine(getApplication()) }
     private val callAudioRouter: CallAudioRouter by lazy { CallAudioRouter(getApplication()) }
-    private val callSignalingService: FirestoreCallSignalingService by lazy { FirestoreCallSignalingService() }
+    private val callSignalingService: FirestoreCallSignalingService by lazy { FirestoreCallSignalingService(getApplication()) }
 
     val livekitLocalVideoTrack: StateFlow<io.livekit.android.room.track.VideoTrack?>
         get() = callLiveKitEngine.localVideoTrack
@@ -220,9 +273,23 @@ class AyerViewModel(application: Application) : AndroidViewModel(application) {
     private val _isVideoCallActive = MutableStateFlow(false)
     val isVideoCallActive = _isVideoCallActive.asStateFlow()
 
+    private val _matchQueueSize = MutableStateFlow(0)
+    val matchQueueSize = _matchQueueSize.asStateFlow()
+
+    private val _matchWaitSeconds = MutableStateFlow(0)
+    val matchWaitSeconds = _matchWaitSeconds.asStateFlow()
+
+    private var matchPollingJob: Job? = null
+
     // Live Stream State
-    private val _liveStreams = MutableStateFlow<List<LiveStreamRoom>>(emptyList())
-    val liveStreams = _liveStreams.asStateFlow()
+    private val _rawLiveStreams = MutableStateFlow<List<LiveStreamRoom>>(emptyList())
+    val liveStreams: StateFlow<List<LiveStreamRoom>>
+
+    private val _activeBroadcastIsHost = MutableStateFlow(false)
+    val activeBroadcastIsHost = _activeBroadcastIsHost.asStateFlow()
+
+    private val _isBroadcastLoading = MutableStateFlow(false)
+    val isBroadcastLoading = _isBroadcastLoading.asStateFlow()
 
     private val _selectedLiveStream = MutableStateFlow<LiveStreamRoom?>(null)
     val selectedLiveStream = _selectedLiveStream.asStateFlow()
@@ -231,17 +298,13 @@ class AyerViewModel(application: Application) : AndroidViewModel(application) {
     val streamMessages = _streamMessages.asStateFlow()
 
     // Live Stream Creator Moderation Dashboard State
-    private val _streamBlockedUsers = MutableStateFlow<Set<String>>(setOf("Spammer_99", "BadActor_2026"))
+    private val _streamBlockedUsers = MutableStateFlow<Set<String>>(emptySet())
     val streamBlockedUsers = _streamBlockedUsers.asStateFlow()
 
-    private val _streamRestrictedKeywords = MutableStateFlow<Set<String>>(
-        setOf("شتيمة", "احتيال", "ممنوع", "spam", "scam", "telegram", "whatsapp")
-    )
+    private val _streamRestrictedKeywords = MutableStateFlow<Set<String>>(emptySet())
     val streamRestrictedKeywords = _streamRestrictedKeywords.asStateFlow()
 
-    private val _activeStreamViewers = MutableStateFlow<List<String>>(
-        listOf("فهد الشمري", "Alex_Global", "سارة أحمد", "خالد المنصور", "User_912", "Spammer_99")
-    )
+    private val _activeStreamViewers = MutableStateFlow<List<String>>(emptyList())
     val activeStreamViewers = _activeStreamViewers.asStateFlow()
 
     private val _activeGiftEffect = MutableStateFlow<GiftItem?>(null)
@@ -269,9 +332,41 @@ class AyerViewModel(application: Application) : AndroidViewModel(application) {
 
     private var candidateIndex = 0
 
-        init {
+    init {
         val db = AyerDatabase.getDatabase(application)
-        repository = AyerRepository(db.userDao(), db.transactionDao(), db.notificationDao(), db.secondaryProfileDao())
+        repository = AyerRepository(
+            application,
+            db.userDao(),
+            db.transactionDao(),
+            db.notificationDao(),
+            db.secondaryProfileDao()
+        )
+
+        lateinit var billingRef: PlayBillingManager
+        billingRef = PlayBillingManager(
+            context = application,
+            onVerifiedPurchaseReady = { productId, purchaseToken, orderId ->
+                viewModelScope.launch {
+                    val res = repository.verifyAndCreditPlayPurchase(productId, purchaseToken, orderId)
+                    if (res.isSuccess) {
+                        billingRef.consumeVerifiedPurchase(purchaseToken)
+                        _uiNotice.value = "تم التحقق من Google Play وإضافة +${res.getOrNull() ?: 0} نقطة إلى محفظتك 🎉"
+                    } else {
+                        _uiNotice.value = res.exceptionOrNull()?.message ?: "تعذر تأكيد عملية الشراء من الخادم."
+                    }
+                }
+            },
+            onBillingError = { message ->
+                _uiNotice.value = message
+            }
+        )
+        playBillingManager = billingRef
+        playProductPrices = playBillingManager.formattedPrices
+        isPlayBillingReady = playBillingManager.isBillingReady
+        blockedUserIds = combine(repository.blockedUserIds, _firestoreBlockedUsers) { a, b -> a + b }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptySet())
+        subAgentsList = repository.subAgents
+        myPayouts = repository.myPayouts
 
         callGovernanceManager = CallGovernanceManager(
             callDao = db.callDao(),
@@ -369,11 +464,98 @@ class AyerViewModel(application: Application) : AndroidViewModel(application) {
             emptySet()
         )
 
-        _liveStreams.value = repository.getSampleStreams()
+        liveStreams = combine(_rawLiveStreams, blockedUserIds, flaggedStreamIds) { list, blocked, flagged ->
+            list.filter { it.hostUid !in blocked && it.id !in flagged }
+        }.stateIn(
+            viewModelScope,
+            SharingStarted.WhileSubscribed(5000),
+            emptyList()
+        )
+
+        friendsList = combine(_rawFriendsList, blockedUserIds) { list, blocked ->
+            list.filter { it.id !in blocked && it.status != FriendshipStatus.BLOCKED }
+        }.stateIn(
+            viewModelScope,
+            SharingStarted.WhileSubscribed(5000),
+            emptyList()
+        )
 
         viewModelScope.launch {
-            repository.initializeDefaultUserIfNeeded()
+            preferencesStore.darkThemeFlow.collect { stored ->
+                _isDarkTheme.value = stored
+            }
+        }
+        viewModelScope.launch {
+            preferencesStore.appLanguageFlow.collect { lang ->
+                _appLanguage.value = lang
+            }
+        }
+
+        viewModelScope.launch {
             callGovernanceManager.ensureDefaultConfig()
+        }
+
+        val firebaseAuth = auth
+        if (firebaseAuth != null) {
+            viewModelScope.launch {
+                firebaseAuth.authStateFlow().collect { firebaseUser ->
+                    _isUserLoggedIn.value = firebaseUser != null
+                    authSessionSyncJob?.cancel()
+                    if (firebaseUser != null) {
+                        val lastSignInMs = firebaseUser.metadata?.lastSignInTimestamp
+                        _lastLoginTimestamp.value = if (lastSignInMs != null && lastSignInMs > 0L) {
+                            SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date(lastSignInMs))
+                        } else {
+                            "جلسة مصادقة نشطة"
+                        }
+                        _isTwoFactorAuthEnabled.value = true
+                        authSessionSyncJob = launch {
+                            repository.syncAuthenticatedUser(firebaseUser)
+                            launch {
+                                repository.observeRemoteUserDoc(firebaseUser.uid).collect { remoteDoc ->
+                                    if (remoteDoc != null) {
+                                        repository.applyRemoteUserSnapshot(remoteDoc)
+                                    }
+                                }
+                            }
+                            launch {
+                                repository.observeAgeVerification(firebaseUser.uid).collect { sub ->
+                                    _ageVerificationSubmission.value = sub
+                                }
+                            }
+                            launch {
+                                repository.observeFirestoreBlockedUsers(firebaseUser.uid).collect { blocked ->
+                                    _firestoreBlockedUsers.value = blocked
+                                }
+                            }
+                            launch {
+                                repository.observeFriends(firebaseUser.uid).collect { friends ->
+                                    _rawFriendsList.value = friends
+                                }
+                            }
+                            launch {
+                                repository.observePrivacySettings(firebaseUser.uid).collect { snap ->
+                                    if (snap != null) {
+                                        runCatching {
+                                            _profileVisibility.value = com.example.data.model.ProfileVisibilityOption.valueOf(snap.profileVisibility)
+                                        }
+                                        runCatching {
+                                            _directMessagePermission.value = com.example.data.model.DirectMessagePermission.valueOf(snap.directMessagePermission)
+                                        }
+                                        _showOnlineStatus.value = snap.showOnlineStatus
+                                        _hideLocationInMatch.value = snap.hideLocationInMatch
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        _ageVerificationSubmission.value = null
+                        _rawFriendsList.value = emptyList()
+                        _firestoreBlockedUsers.value = emptySet()
+                        _lastLoginTimestamp.value = "غير مسجل"
+                    }
+                }
+            }
         }
     }
 
@@ -381,8 +563,22 @@ class AyerViewModel(application: Application) : AndroidViewModel(application) {
         firestoreChatJob?.cancel()
         _currentMatchId.value = matchId
         firestoreChatJob = viewModelScope.launch {
+            val myUid = currentCallActorId()
             repository.observeFirestoreMatchMessages(matchId).collect { messages ->
-                _firestoreMatchMessages.value = messages
+                val enriched = if (_isTranslationEnabled.value) {
+                    val targetLang = if (_appLanguage.value == AppLanguage.ARABIC) "Arabic" else "English"
+                    messages.map { msg ->
+                        if (msg.senderId != myUid && msg.translatedText.isNullOrBlank()) {
+                            val translated = aiTranslationService.translateText(msg.text, targetLang).getOrNull()
+                            if (!translated.isNullOrBlank()) msg.copy(translatedText = translated) else msg
+                        } else {
+                            msg
+                        }
+                    }
+                } else {
+                    messages
+                }
+                _firestoreMatchMessages.value = enriched
             }
         }
     }
@@ -448,106 +644,143 @@ class AyerViewModel(application: Application) : AndroidViewModel(application) {
             _uiNotice.value = "رصيدك غير كافٍ! تحتاج $cost نقطة للمطابقة بهذا الفلتر."
             return
         }
+        matchPollingJob?.cancel()
+        _matchingStatus.value = MatchingStatus.Searching
+        _isVideoCallActive.value = false
+        _matchChatMessages.value = emptyList()
+        _matchWaitSeconds.value = 0
 
-        viewModelScope.launch {
-            val filterDesc = "نوع الدردشة: ${_selectedChatType.value.title} (${_selectedChatType.value.cost}🪙) | النوع: ${_selectedGenderFilter.value} | الدولة: ${_selectedCountryFilter.value}"
-            val success = repository.spendPointsForMatch(cost, filterDesc)
-            if (success) {
-                // Step 1: Searching state with rapidly spinning 3D globe
-                _matchingStatus.value = MatchingStatus.Searching
-                _isVideoCallActive.value = false
-                _matchChatMessages.value = emptyList()
+        val profile = userProfile.value
+        val displayName = profile?.name?.ifBlank { "مستخدم HUH" } ?: "مستخدم HUH"
+        val country = if (_hideLocationInMatch.value) "" else profile?.country.orEmpty()
+        val countryCode = if (_hideLocationInMatch.value) "SA" else profile?.countryCode?.ifBlank { "SA" } ?: "SA"
+        val userGender = profile?.gender?.ifBlank { "ANY" } ?: "ANY"
+        val chatType = _selectedChatType.value
+        val genderFilter = _selectedGenderFilter.value
+        val countryFilter = _selectedCountryFilter.value
 
-                // Radar scanning animation delay while 3D globe is spinning around the world
-                delay(2200)
-
-                if (_matchingStatus.value !is MatchingStatus.Searching) return@launch
-
-                val candidates = repository.getSampleMatchCandidates()
-                val candidate = candidates[candidateIndex % candidates.size]
-                candidateIndex++
-
-                // Step 2: Partner Found! Globe locks on coordinates and performs cinematic Zoom-In
-                _matchingStatus.value = MatchingStatus.Found(candidate)
-
-                // Cinematic Zoom-In duration on partner's location on the globe
-                delay(1800)
-
-                if (_matchingStatus.value !is MatchingStatus.Found) return@launch
-
-                // Step 3: Zoom completes -> Smoothly open the live conversation/chat between both parties
-                val matchRoomId = "match_${candidate.id}_${System.currentTimeMillis()}"
-                _currentMatchId.value = matchRoomId
-                startObservingFirestoreMatchMessages(matchRoomId)
-
-                _matchingStatus.value = MatchingStatus.Connected(candidate, _selectedChatType.value)
-                _isVideoCallActive.value = (_selectedChatType.value == MatchChatType.VIDEO)
-
-                // Track engagement for beginning a match
-                repository.recordMatchEngagement()
-
-                // Initial welcome message with simulated translation
-                val initialCandidateGreeting = if (candidate.countryCode == "SA" || candidate.countryCode == "KW")
-                    "أهلاً وسهلاً، كيف حالك؟ تشرفت بالتواصل معك! 👋"
-                else
-                    "Hello! Nice to meet you here, how is your day? 😊"
-                val initialCandidateTranslation = "مرحباً! سررت بلقائك هنا، كيف يسير يومك؟ 😊"
-
-                repository.sendFirestoreMatchMessage(
-                    matchId = matchRoomId,
-                    senderId = "cand_${candidate.id}",
-                    senderName = candidate.name,
-                    text = initialCandidateGreeting,
-                    translatedText = initialCandidateTranslation
-                )
-
-                _matchChatMessages.value = listOf(
-                    StreamMessage(
-                        id = "1",
-                        senderName = candidate.name,
-                        originalText = initialCandidateGreeting,
-                        translatedText = initialCandidateTranslation
-                    )
-                )
-            } else {
-                _uiNotice.value = "فشلت عملية الخصم، يرجى المحاولة لاحقاً."
-            }
+        matchPollingJob = viewModelScope.launch {
+            val joinRes = repository.joinMatchQueue(
+                displayName = displayName,
+                country = country,
+                countryCode = countryCode,
+                userGender = userGender,
+                bio = profile?.bio.orEmpty(),
+                chatType = chatType.code,
+                genderFilter = genderFilter,
+                countryFilter = countryFilter
+            )
+            joinRes.fold(
+                onSuccess = { initial ->
+                    if (initial.status == "MATCHED") {
+                        onMatchFoundFromServer(initial)
+                    } else {
+                        _matchQueueSize.value = initial.queueSize
+                        _matchWaitSeconds.value = initial.waitSeconds
+                        while (_matchingStatus.value is MatchingStatus.Searching) {
+                            delay(2000)
+                            val poll = repository.pollMatchQueue().getOrNull() ?: continue
+                            _matchQueueSize.value = poll.queueSize
+                            _matchWaitSeconds.value = poll.waitSeconds
+                            if (poll.status == "MATCHED") {
+                                onMatchFoundFromServer(poll)
+                                break
+                            }
+                        }
+                    }
+                },
+                onFailure = { err ->
+                    _matchingStatus.value = MatchingStatus.Idle
+                    _uiNotice.value = err.message ?: "تعذر الاتصال بخادم المطابقة المباشر."
+                }
+            )
         }
     }
 
+    private suspend fun onMatchFoundFromServer(res: com.example.data.remote.MatchJoinPollResponseDto) {
+        val partnerDto = res.partner ?: return
+        val matchId = res.matchId ?: return
+        val resolvedType = MatchChatType.fromCode(res.chatType ?: _selectedChatType.value.code)
+        val candidate = MatchCandidate(
+            id = partnerDto.uid,
+            name = partnerDto.name.ifBlank { "مستخدم HUH" },
+            age = partnerDto.age.coerceAtLeast(18),
+            country = partnerDto.country.ifBlank { "العالم 🌐" },
+            countryCode = partnerDto.countryCode.ifBlank { "SA" },
+            gender = partnerDto.gender,
+            language = "العربية",
+            bio = partnerDto.bio,
+            interests = listOf("تعارف", "دردشة")
+        )
+        _matchingStatus.value = MatchingStatus.Found(candidate)
+        if (resolvedType != MatchChatType.TEXT && !res.livekitUrl.isNullOrBlank() && !res.token.isNullOrBlank() && !res.token.startsWith("pending_lk_")) {
+            callLiveKitEngine.connect(
+                livekitUrl = res.livekitUrl,
+                token = res.token,
+                enableVideo = (resolvedType == MatchChatType.VIDEO),
+                publishMedia = true,
+                endOnRemoteLeave = true,
+                onReconnecting = { _uiNotice.value = "جارٍ إعادة الاتصال..." },
+                onReconnected = {},
+                onRemoteParticipantLeft = { endCurrentMatch() },
+                onConnectionQualityWeak = {},
+                onDisconnected = {}
+            )
+            _isVideoCallActive.value = (resolvedType == MatchChatType.VIDEO)
+        }
+        delay(900)
+        _matchingStatus.value = MatchingStatus.Connected(candidate, resolvedType)
+        startObservingFirestoreMatchMessages(matchId)
+    }
+
     fun skipCurrentMatch() {
+        val prevMatchId = _currentMatchId.value
+        matchPollingJob?.cancel()
+        matchPollingJob = null
         _matchingStatus.value = MatchingStatus.Idle
         _isVideoCallActive.value = false
         repository.stopFirestoreChat()
-        startRandomMatch()
+        runCatching { callLiveKitEngine.disconnect() }
+        viewModelScope.launch {
+            repository.leaveMatchQueue(prevMatchId)
+            startRandomMatch()
+        }
     }
 
     fun startVoiceMatch() {
         _selectedChatType.value = MatchChatType.VOICE
         startRandomMatch()
-        _uiNotice.value = "تم بدء المطابقة الصوتية السريعة (وضع الصوت النقي 🎙️)"
     }
 
     fun startVipMatch() {
         startRandomMatch()
-        _uiNotice.value = "تم تفعيل رادار VIP فائق السرعة والأولوية القصوى 💎"
     }
 
     fun endCurrentMatch() {
+        val prevMatchId = _currentMatchId.value
+        matchPollingJob?.cancel()
+        matchPollingJob = null
         _matchingStatus.value = MatchingStatus.Idle
         _isVideoCallActive.value = false
+        _currentMatchId.value = null
         repository.stopFirestoreChat()
+        runCatching { callLiveKitEngine.disconnect() }
+        viewModelScope.launch {
+            repository.leaveMatchQueue(prevMatchId)
+        }
     }
 
     fun sendMatchChatMessage(text: String) {
         if (text.isBlank()) return
-        val sender = userProfile.value?.name ?: "أنا"
-        val matchId = _currentMatchId.value ?: "match_${System.currentTimeMillis()}"
+        val sender = userProfile.value?.name?.ifBlank { "أنا" } ?: "أنا"
+        val matchId = _currentMatchId.value ?: return
+        val senderUid = currentCallActorId()
+        val msgId = System.currentTimeMillis().toString()
 
         val current = _matchChatMessages.value.toMutableList()
         current.add(
             StreamMessage(
-                id = System.currentTimeMillis().toString(),
+                id = msgId,
                 senderName = sender,
                 originalText = text,
                 translatedText = null
@@ -555,78 +788,147 @@ class AyerViewModel(application: Application) : AndroidViewModel(application) {
         )
         _matchChatMessages.value = current
 
-        // Send to Firestore real-time messaging
         viewModelScope.launch {
+            val translated = if (_isTranslationEnabled.value) {
+                val targetLang = if (_appLanguage.value == AppLanguage.ARABIC) "English" else "Arabic"
+                aiTranslationService.translateText(text, targetLang).getOrNull()
+            } else {
+                null
+            }
+            if (!translated.isNullOrBlank()) {
+                _matchChatMessages.value = _matchChatMessages.value.map {
+                    if (it.id == msgId) it.copy(translatedText = translated) else it
+                }
+            }
             repository.sendFirestoreMatchMessage(
                 matchId = matchId,
-                senderId = "user_me",
+                senderId = senderUid,
                 senderName = sender,
                 text = text,
-                translatedText = null
+                translatedText = translated
             )
-            // Track match engagement points
             repository.recordMatchEngagement()
-
-            // Simulate partner response
-            delay(1500)
-            val partnerName = (_matchingStatus.value as? MatchingStatus.Connected)?.candidate?.name ?: "الطرف الآخر"
-            val partnerResponseText = "That's wonderful! What are your favorite hobbies? 🌟"
-            val partnerResponseTrans = "هذا رائع جداً! ما هي هواياتك المفضلة؟ 🌟"
-
-            repository.sendFirestoreMatchMessage(
-                matchId = matchId,
-                senderId = "user_partner",
-                senderName = partnerName,
-                text = partnerResponseText,
-                translatedText = partnerResponseTrans
-            )
-
-            val partnerResponse = StreamMessage(
-                id = (System.currentTimeMillis() + 1).toString(),
-                senderName = partnerName,
-                originalText = partnerResponseText,
-                translatedText = partnerResponseTrans
-            )
-            _matchChatMessages.value = _matchChatMessages.value + partnerResponse
         }
     }
 
     // Live Stream Actions
-    fun startUserLiveStream(title: String = "بثي المباشر") {
-        val myName = userProfile.value?.name ?: "أنا"
-        val myCountry = userProfile.value?.country ?: "المملكة العربية السعودية"
-        val myCountryCode = userProfile.value?.countryCode ?: "SA"
-        val newStream = LiveStreamRoom(
-            id = "user_stream_${System.currentTimeMillis()}",
-            title = title,
-            hostName = myName,
-            hostCountry = myCountry,
-            hostCountryCode = myCountryCode,
-            viewersCount = 1,
-            category = "تعارف وسوالف",
-            diamondsReceived = 0,
-            imageResId = com.example.R.drawable.stream_hero_bg
-        )
-        _selectedLiveStream.value = newStream
-        _streamMessages.value = listOf(
-            StreamMessage("sys1", "نظام الأمان", "مرحباً بك في بثك المباشر! استخدم أدوات التحكم لكتم الصوت، تبديل الكاميرا، أو إيقاف البث مؤقتاً.", isSystem = true),
-            StreamMessage("sys2", "Ayer Live", "أنت الآن على الهواء مباشرة! 🔴", isSystem = true)
-        )
-        _uiNotice.value = "تم بدء البث المباشر بنجاح! 🔴"
+    fun refreshLiveStreams() {
+        viewModelScope.launch {
+            _isBroadcastLoading.value = true
+            repository.fetchLiveStreams().onSuccess { list ->
+                _rawLiveStreams.value = list
+            }
+            _isBroadcastLoading.value = false
+        }
+    }
+
+    fun startUserLiveStream(title: String = "بثي المباشر", category: String = "تعارف وسوالف") {
+        val profile = userProfile.value
+        val myName = profile?.name?.ifBlank { "مضيف HUH" } ?: "مضيف HUH"
+        val myCountry = profile?.country?.ifBlank { "المملكة العربية السعودية" } ?: "المملكة العربية السعودية"
+        val myCountryCode = profile?.countryCode?.ifBlank { "SA" } ?: "SA"
+        viewModelScope.launch {
+            _isBroadcastLoading.value = true
+            val res = repository.startLiveBroadcast(
+                title = title,
+                category = category,
+                hostName = myName,
+                hostCountry = myCountry,
+                hostCountryCode = myCountryCode
+            )
+            _isBroadcastLoading.value = false
+            res.fold(
+                onSuccess = { session ->
+                    val room = with(repository) { session.stream.toRoomModel() }
+                    _activeBroadcastIsHost.value = true
+                    _selectedLiveStream.value = room
+                    _streamMessages.value = listOf(
+                        StreamMessage("sys1", "نظام الأمان", "مرحباً بك في بثك المباشر! استخدم أدوات التحكم لكتم الصوت، تبديل الكاميرا، أو إيقاف البث مؤقتاً.", isSystem = true),
+                        StreamMessage("sys2", "HUH Live", "أنت الآن على الهواء مباشرة عبر LiveKit SFU 🔴", isSystem = true)
+                    )
+                    if (session.livekitUrl.isNotBlank() && session.token.isNotBlank() && !session.token.startsWith("pending_lk_")) {
+                        callLiveKitEngine.connect(
+                            livekitUrl = session.livekitUrl,
+                            token = session.token,
+                            enableVideo = true,
+                            publishMedia = true,
+                            endOnRemoteLeave = false,
+                            onReconnecting = { _uiNotice.value = "جارٍ استعادة اتصال البث..." },
+                            onReconnected = { _uiNotice.value = "تمت استعادة اتصال البث" },
+                            onRemoteParticipantLeft = {},
+                            onConnectionQualityWeak = {},
+                            onDisconnected = {}
+                        )
+                    }
+                    refreshLiveStreams()
+                    _uiNotice.value = "تم بدء البث المباشر بنجاح! 🔴"
+                },
+                onFailure = { err ->
+                    _uiNotice.value = err.message ?: "تعذر بدء البث المباشر."
+                }
+            )
+        }
     }
 
     fun openLiveStream(stream: LiveStreamRoom) {
+        _activeBroadcastIsHost.value = (stream.hostUid.isNotBlank() && stream.hostUid == userProfile.value?.uid)
         _selectedLiveStream.value = stream
         _streamMessages.value = listOf(
-            StreamMessage("m1", "نظام الأمان", "مرحباً بك في بث ${stream.hostName}! يُرجى الالتزام بسياسات المجتمع والاحترام المتبادل.", isSystem = true),
-            StreamMessage("m2", "فهد الشمري", "منور البث يا غالي ✨", translatedText = null),
-            StreamMessage("m3", "Alex_Global", "Awesome vibe here! Greetings from Toronto 🇨🇦", translatedText = "أجواء رائعة هنا! تحياتي من تورونتو 🇨🇦")
+            StreamMessage("m1", "نظام الأمان", "مرحباً بك في بث ${stream.hostName}! يُرجى الالتزام بسياسات المجتمع والاحترام المتبادل.", isSystem = true)
         )
+        viewModelScope.launch {
+            val res = repository.joinLiveBroadcast(stream.id)
+            res.onSuccess { session ->
+                val updatedRoom = with(repository) { session.stream.toRoomModel() }
+                val isPub = session.role == "PUBLISHER"
+                _activeBroadcastIsHost.value = isPub
+                _selectedLiveStream.value = updatedRoom
+                if (session.livekitUrl.isNotBlank() && session.token.isNotBlank() && !session.token.startsWith("pending_lk_")) {
+                    callLiveKitEngine.connect(
+                        livekitUrl = session.livekitUrl,
+                        token = session.token,
+                        enableVideo = isPub,
+                        publishMedia = isPub,
+                        endOnRemoteLeave = false,
+                        onReconnecting = {},
+                        onReconnected = {},
+                        onRemoteParticipantLeft = {},
+                        onConnectionQualityWeak = {},
+                        onDisconnected = {}
+                    )
+                }
+            }.onFailure { err ->
+                _uiNotice.value = err.message ?: "تعذر الاتصال بغرفة البث."
+            }
+        }
     }
 
     fun closeLiveStream() {
+        val stream = _selectedLiveStream.value
+        val wasHost = _activeBroadcastIsHost.value
         _selectedLiveStream.value = null
         _activeGiftEffect.value = null
+        _activeBroadcastIsHost.value = false
+        runCatching { callLiveKitEngine.disconnect() }
+        if (stream != null) {
+            viewModelScope.launch {
+                if (wasHost) repository.endLiveBroadcast(stream.id)
+                else repository.leaveLiveBroadcast(stream.id)
+                refreshLiveStreams()
+            }
+        }
+    }
+
+    fun setBroadcastMuted(muted: Boolean) {
+        viewModelScope.launch { callLiveKitEngine.setMicrophoneMuted(muted) }
+    }
+
+    fun setBroadcastVideoEnabled(enabled: Boolean) {
+        viewModelScope.launch { callLiveKitEngine.setCameraEnabled(enabled) }
+    }
+
+    fun switchBroadcastCamera(toFront: Boolean) {
+        callLiveKitEngine.switchCamera(toFront)
     }
 
     fun sendStreamMessage(text: String) {
@@ -716,8 +1018,14 @@ class AyerViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         viewModelScope.launch {
-            val success = repository.sendGift(gift, stream.hostName)
+            val success = repository.sendGift(
+                gift = gift,
+                streamHost = stream.hostName,
+                recipientUid = stream.hostUid,
+                streamId = stream.id
+            )
             if (success) {
+                _selectedLiveStream.value = stream.copy(diamondsReceived = stream.diamondsReceived + gift.pointsCost)
                 _activeGiftEffect.value = gift
                 val giftMsg = StreamMessage(
                     id = System.currentTimeMillis().toString(),
@@ -729,123 +1037,213 @@ class AyerViewModel(application: Application) : AndroidViewModel(application) {
                 _streamMessages.value = _streamMessages.value + giftMsg
                 delay(3000)
                 _activeGiftEffect.value = null
+            } else {
+                _uiNotice.value = "تعذر إرسال الهدية. يرجى المحاولة مجدداً."
             }
         }
     }
 
-    // Wallet & Purchases
+    // Wallet & Google Play Billing Purchases
+    fun initPlayBilling() {
+        playBillingManager.startConnection()
+    }
+
     fun claimDailyBonus() {
         viewModelScope.launch {
-            val claimed = repository.claimDailyReward()
-            if (claimed) {
-                _uiNotice.value = "تم استلام 10 نقاط مجانية يومية بنجاح! 🎁"
+            val res = repository.claimDailyRewardResult()
+            _uiNotice.value = if (res.isSuccess) {
+                "تم استلام +${res.getOrNull() ?: 10} نقاط مجانية يومية بنجاح! 🎁"
             } else {
-                _uiNotice.value = "لقد استلمت نقاط اليوم بالفعل! عُد غداً للحصول على 10 نقاط جديدة."
+                res.exceptionOrNull()?.message ?: "لقد استلمت نقاط اليوم بالفعل! عُد غداً."
             }
         }
     }
 
-    fun purchasePackage(coinPackage: CoinPackage) {
+    fun purchasePackage(coinPackage: CoinPackage, activity: Activity? = null) {
+        if (activity == null) {
+            _uiNotice.value = "تعذر فتح Google Play Billing: الشاشة غير نشطة."
+            return
+        }
+        playBillingManager.startConnection()
+        playBillingManager.launchPurchaseFlow(activity, coinPackage.productId)
+    }
+
+    fun refreshAgencyDashboard() {
         viewModelScope.launch {
-            repository.purchaseCoinPackage(coinPackage)
-            _uiNotice.value = "تمت عملية الشراء بنجاح! تمت إضافة ${coinPackage.coins + coinPackage.bonusCoins} نقطة إلى محفظتك 🎉"
+            repository.refreshAgencyDashboard()
+        }
+    }
+
+    fun requestBankPayout(
+        amountCoins: Int,
+        payoutMethod: String,
+        bankAccountHolder: String,
+        bankName: String,
+        ibanOrAccount: String,
+        onComplete: (Boolean) -> Unit = {}
+    ) {
+        viewModelScope.launch {
+            val res = repository.requestBankPayout(
+                amountCoins = amountCoins,
+                payoutMethod = payoutMethod,
+                bankAccountHolder = bankAccountHolder,
+                bankName = bankName,
+                ibanOrAccount = ibanOrAccount
+            )
+            if (res.isSuccess) {
+                _uiNotice.value = "تم تقديم طلب سحب $amountCoins نقطة ($${amountCoins / 10}) للمراجعة الإدارية 🏦"
+                onComplete(true)
+            } else {
+                _uiNotice.value = res.exceptionOrNull()?.message ?: "تعذر تقديم طلب السحب."
+                onComplete(false)
+            }
         }
     }
 
     fun withdrawHostEarnings(coins: Int) {
-        viewModelScope.launch {
-            val success = repository.withdrawCoins(coins)
-            if (success) {
-                _uiNotice.value = "تم تقديم طلب سحب $coins نقطة ($${coins / 10}) بنجاح وسيتم تحويلها لحسابك البنكي خلال 24 ساعة."
-            } else {
-                _uiNotice.value = "رصيد أرباحك غير كافٍ لإتمام طلب السحب."
-            }
-        }
+        _uiNotice.value = "يرجى تعبئة بيانات الحساب البنكي في نموذج سحب الأرباح لتقديم الطلب للمراجعة."
     }
 
     fun applyAsHost() {
         viewModelScope.launch {
             repository.applyForHost("الوكالة الماسية")
-            _uiNotice.value = "تم تقديم طلب انضمامك كمضيف معتمد تحت الوكالة الماسية. سيتم مراجعة الهوية خلال 24 ساعة."
-        }
-    }
-
-    fun upgradeToAgent() {
-        viewModelScope.launch {
-            repository.toggleAgentStatus(true)
-            _uiNotice.value = "تهانينا! 🎉 تم ترقية حسابك رسمياً إلى 'وكيل معتمد'. يمكنك الآن دعوة وكلاء وكسب عمولة من أرباحهم وتفقد بوابة الوكالات."
-        }
-    }
-
-    fun downgradeAgentForTesting() {
-        viewModelScope.launch {
-            repository.toggleAgentStatus(false)
-            _uiNotice.value = "تم إعادة الحساب إلى حساب مستخدم/إنفلونسر عادي (تم إخفاء بوابة الوكالات)."
+            _uiNotice.value = "تم تقديم طلب انضمامك كمضيف معتمد. سيتم مراجعة الطلب من الإدارة."
         }
     }
 
     fun updateAgentCommissionFromAdmin(percent: Int) {
+        if (userProfile.value?.isAdmin != true) {
+            _uiNotice.value = "صلاحية تعديل العمولات محصورة بحساب الإدارة."
+            return
+        }
+        val targetUid = userProfile.value?.uid?.takeIf { it.isNotBlank() } ?: return
         viewModelScope.launch {
-            repository.updateAgentCommissionFromAdmin(percent)
-            _uiNotice.value = "تم تحديث نسبة عمولة الوكيل بنجاح من لوحة الأدمن إلى $percent%"
+            val res = repository.updateUserRolesAdmin(targetUid = targetUid, agentCommissionPercent = percent)
+            _uiNotice.value = if (res.isSuccess) {
+                "تم تحديث نسبة عمولة الوكيل بنجاح من الخادم إلى $percent%"
+            } else {
+                res.exceptionOrNull()?.message ?: "تعذر تحديث العمولة"
+            }
         }
     }
 
     fun recruitNewSubAgent(name: String, country: String) {
         viewModelScope.launch {
-            val notif = repository.recruitSubAgent(name, country)
-            _activeInAppNotification.value = notif
-            AyerNotificationManager.sendSystemNotification(
-                context = getApplication(),
-                notificationId = System.currentTimeMillis().toInt(),
-                title = notif.title,
-                message = notif.message,
-                type = notif.type,
-                coinsBadge = "+250 💎"
-            )
-            _uiNotice.value = "تمت دعوة الوكيل '$name' بنجاح تحت شبكتك وحصلت على مكافأة ترحيبية 250 نقطة 💎"
+            val res = repository.recruitSubAgentResult(name, country)
+            if (res.isSuccess) {
+                val notif = res.getOrNull()!!
+                _activeInAppNotification.value = notif
+                _uiNotice.value = "تم تسجيل الوكيل '$name' في شبكتك الرسمية"
+            } else {
+                _uiNotice.value = res.exceptionOrNull()?.message ?: "تعذر إضافة الوكيل الفرعي"
+            }
         }
     }
 
-    fun payoutCommission(amountCoins: Int, sourceDescription: String, senderName: String = "أرباح شبكة المضيفين") {
+    fun loadAdminQueues() {
+        if (userProfile.value?.isAdmin != true) return
         viewModelScope.launch {
-            val notif = repository.payoutCommission(amountCoins, sourceDescription, senderName)
-            _activeInAppNotification.value = notif
-            AyerNotificationManager.sendSystemNotification(
-                context = getApplication(),
-                notificationId = System.currentTimeMillis().toInt(),
-                title = notif.title,
-                message = notif.message,
-                type = notif.type,
-                coinsBadge = "+$amountCoins 💎"
-            )
-            _uiNotice.value = "تم استلام دفعة عمولة بقيمة $amountCoins نقطة ($${amountCoins / 10}.00) من $sourceDescription! 💰"
+            repository.fetchAdminAgeVerifications("PENDING_REVIEW").onSuccess {
+                _adminAgeVerifications.value = it
+            }
+            repository.fetchAdminPayouts("ALL").onSuccess {
+                _adminPayouts.value = it
+            }
+            repository.fetchAdminReports("PENDING_REVIEW").onSuccess {
+                _adminReports.value = it
+            }
         }
     }
 
-    fun triggerSampleReferralNotification() {
-        val sampleNames = listOf(
-            Pair("سلطان الدوسري - فالكون لايف", "السعودية"),
-            Pair("ريم الكعبي - إمارات ميديا", "الإمارات"),
-            Pair("كريم الشناوي - بيراميدز كاست", "مصر"),
-            Pair("حسام التميمي - كويت ستارز", "الكويت")
-        )
-        val selected = sampleNames.random()
-        recruitNewSubAgent(selected.first, selected.second)
+    fun reviewAgeVerificationAdmin(targetUid: String, decision: String, reason: String? = null) {
+        if (userProfile.value?.isAdmin != true) return
+        viewModelScope.launch {
+            val res = repository.reviewAdminAgeVerification(targetUid, decision, reason)
+            _uiNotice.value = if (res.isSuccess) {
+                loadAdminQueues()
+                "تم تحديث حالة التحقق (+18) إلى $decision"
+            } else {
+                res.exceptionOrNull()?.message ?: "تعذر تحديث حالة التحقق"
+            }
+        }
     }
 
-    fun triggerSampleCommissionPayout(amountCoins: Int = 750) {
-        val sources = listOf(
-            "عمولة بثوث المضيف 'عمر الفاروق' (14 ساعة بث)",
-            "أرباح هدايا VIP لوكالة 'ليلى الهاشمي' (جولدن ستارز)",
-            "حصة الأرباح الأسبوعية من مضيفي كاريزما إيجنسي",
-            "عمولة مطابقة حصرية ومكالمات فيديو شبكة الوكلاء"
-        )
-        payoutCommission(
-            amountCoins = amountCoins,
-            sourceDescription = sources.random(),
-            senderName = "بوابة توزيع العمولات"
-        )
+    fun reviewPayoutAdmin(requestId: String, decision: String, note: String? = null, paymentReference: String? = null) {
+        if (userProfile.value?.isAdmin != true) return
+        viewModelScope.launch {
+            val res = repository.reviewAdminPayout(requestId, decision, note, paymentReference)
+            _uiNotice.value = if (res.isSuccess) {
+                loadAdminQueues()
+                "تم تحديث حالة طلب السحب إلى $decision"
+            } else {
+                res.exceptionOrNull()?.message ?: "تعذر تحديث طلب السحب"
+            }
+        }
+    }
+
+    fun updateUserRolesAdmin(
+        targetUid: String,
+        isAgent: Boolean?,
+        isHost: Boolean?,
+        agentCommissionPercent: Int?,
+        agencyName: String?
+    ) {
+        if (userProfile.value?.isAdmin != true) return
+        viewModelScope.launch {
+            val res = repository.updateUserRolesAdmin(
+                targetUid = targetUid.trim(),
+                isAgent = isAgent,
+                isHost = isHost,
+                agentCommissionPercent = agentCommissionPercent,
+                agencyName = agencyName
+            )
+            _uiNotice.value = if (res.isSuccess) {
+                "تم تحديث صلاحيات الحساب $targetUid بنجاح"
+            } else {
+                res.exceptionOrNull()?.message ?: "تعذر تحديث الصلاحيات"
+            }
+        }
+    }
+
+    fun resolveReportAdmin(reportId: String, status: String, actionTaken: String) {
+        if (userProfile.value?.isAdmin != true) return
+        viewModelScope.launch {
+            val res = repository.resolveAdminReport(reportId, status, actionTaken)
+            _uiNotice.value = if (res.isSuccess) {
+                loadAdminQueues()
+                "تم حسم البلاغ ($actionTaken)"
+            } else {
+                res.exceptionOrNull()?.message ?: "تعذر البت في البلاغ"
+            }
+        }
+    }
+
+    fun blockUser(targetUid: String) {
+        viewModelScope.launch {
+            repository.blockUser(targetUid)
+            _uiNotice.value = "تم حظر المستخدم وإخفاء محتواه عنك 🛡️"
+        }
+    }
+
+    fun unblockUser(targetUid: String) {
+        viewModelScope.launch {
+            repository.unblockUser(targetUid)
+            _uiNotice.value = "تم إلغاء الحظر"
+        }
+    }
+
+    fun deleteAccountPermanently(onResult: (Boolean) -> Unit = {}) {
+        viewModelScope.launch {
+            val res = repository.deleteAccountPermanently()
+            if (res.isSuccess) {
+                logoutUser()
+                _uiNotice.value = "تم حذف حسابك وجميع بياناتك نهائياً ✅"
+                onResult(true)
+            } else {
+                _uiNotice.value = res.exceptionOrNull()?.message ?: "تعذر حذف الحساب"
+                onResult(false)
+            }
+        }
     }
 
     fun dismissInAppNotification() {
@@ -966,6 +1364,10 @@ class AyerViewModel(application: Application) : AndroidViewModel(application) {
         isVideo: Boolean = true,
         friendIdForChatLog: String? = null
     ) {
+        if (blockedUserIds.value.contains(candidate.id)) {
+            _uiNotice.value = "هذا المستخدم محظور — لا يمكن بدء المكالمة 🚫"
+            return
+        }
         if (_activeCallSession.value != null) {
             _uiNotice.value = "يوجد اتصال نشط بالفعل"
             return
@@ -1000,7 +1402,7 @@ class AyerViewModel(application: Application) : AndroidViewModel(application) {
             isAudioPriorityWhenWeak = true,
             isNetworkWeak = false,
             statusHint = "جاري التحقق من السياسة وتجهيز الاتصال...",
-            simulatedSubtitles = "أهلاً بك! سعيد جداً بمحادثتك اليوم عبر Ayer 🌟"
+            liveSubtitles = null
         )
 
         // Initialize fallback local WebRTC preview synchronously for instant responsiveness & test compatibility
@@ -1116,7 +1518,7 @@ class AyerViewModel(application: Application) : AndroidViewModel(application) {
         val myId = currentCallActorId()
         val myName = currentCallActorName()
         val isVideoInitial = invite.callType == CallType.VIDEO
-        activeFriendCallId = _friendsList.value.firstOrNull { it.id == invite.callerId }?.id
+        activeFriendCallId = friendsList.value.firstOrNull { it.id == invite.callerId }?.id
 
         viewModelScope.launch {
             val outcome = callGovernanceManager.acceptIncomingInvite(
@@ -1186,7 +1588,7 @@ class AyerViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             callGovernanceManager.rejectIncomingInvite(invite, myId, myName)
             callSignalingService.updateCallSignalState(invite.callId, CallLifecycleState.REJECTED, myId)
-            val friendMatch = _friendsList.value.firstOrNull { it.id == invite.callerId }
+            val friendMatch = friendsList.value.firstOrNull { it.id == invite.callerId }
             if (friendMatch != null) {
                 appendCallLogToPrivateChat(
                     friendId = friendMatch.id,
@@ -1338,16 +1740,8 @@ class AyerViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
 
-                val subtitle = when ((newSec / 6) % 4) {
-                    0 -> "أهلاً بك! كيف يسير يومك؟ 😊"
-                    1 -> "I'm really enjoying talking with you! ✨ (أستمتع جداً بالحديث معك!)"
-                    2 -> "هل تفضل الدردشة الصوتية أم المرئية أكثر؟ 🎧"
-                    else -> "That sounds amazing! Tell me more. 🚀 (يبدو ذلك رائعاً! أخبرني بالمزيد.)"
-                }
-
                 _activeCallSession.value = current.copy(
-                    durationSeconds = newSec,
-                    simulatedSubtitles = if (current.isTranslationEnabled) subtitle else null
+                    durationSeconds = newSec
                 )
             }
         }
@@ -1513,46 +1907,28 @@ class AyerViewModel(application: Application) : AndroidViewModel(application) {
     fun toggleCallTranslation() {
         val current = _activeCallSession.value ?: return
         val newTrans = !current.isTranslationEnabled
-        _activeCallSession.value = current.copy(isTranslationEnabled = newTrans)
-        _uiNotice.value = if (newTrans) "الترجمة الفورية المباشرة للمكالمة: مفعلة 🌐" else "تم إيقاف الترجمة الفورية للمكالمة"
-    }
-
-    fun simulateNetworkWeakness() {
-        val current = _activeCallSession.value ?: return
-        val newWeak = !current.isNetworkWeak
         _activeCallSession.value = current.copy(
-            isNetworkWeak = newWeak,
-            callState = if (newWeak) CallLifecycleState.RECONNECTING else CallLifecycleState.ACTIVE,
-            reconnectAttempt = if (newWeak) current.reconnectAttempt + 1 else current.reconnectAttempt,
-            statusHint = if (newWeak) "انقطع الاتصال مؤقتاً — جاري إعادة المحاولة 📶" else "استقرت الشبكة وتمت استعادة الاتصال 🔒"
+            isTranslationEnabled = newTrans,
+            liveSubtitles = if (!newTrans) null else current.liveSubtitles
         )
+        _uiNotice.value = if (newTrans) "الترجمة الفورية بالذكاء الاصطناعي للمكالمة: مفعلة 🌐" else "تم إيقاف الترجمة الفورية للمكالمة"
+    }
+
+    fun translateCallSubtitle(spokenText: String) {
+        val current = _activeCallSession.value ?: return
+        if (!current.isTranslationEnabled || spokenText.isBlank()) return
+        val targetLang = if (_appLanguage.value == AppLanguage.ARABIC) "Arabic" else "English"
         viewModelScope.launch {
-            callGovernanceManager.markConnectionState(current.callId, currentCallActorId(), isReconnecting = newWeak)
-        }
-        if (newWeak) {
-            _uiNotice.value = "⚠️ ضعف/انقطاع الشبكة: أوقفنا عداد المدة مؤقتاً لحين استعادة الاتصال."
-        } else {
-            _uiNotice.value = "استقرت سرعة الاتصال واستؤنف البث والعدّاد التلقائي 📶"
+            val res = aiTranslationService.translateText(spokenText, targetLang)
+            res.onSuccess { translated ->
+                _activeCallSession.value = _activeCallSession.value?.copy(liveSubtitles = translated)
+            }.onFailure { err ->
+                _uiNotice.value = err.message ?: "تعذر الترجمة الفورية."
+            }
         }
     }
 
-    fun triggerIncomingCallDemo(callerName: String = "سارة أحمد", isVideo: Boolean = true) {
-        val invite = IncomingCallInvite(
-            callId = "call_demo_${System.currentTimeMillis()}",
-            roomName = "ayer_1on1_demo_${System.currentTimeMillis()}",
-            callerId = "f1",
-            callerName = callerName,
-            callerCountry = "دبي، الإمارات",
-            callType = if (isVideo) CallType.VIDEO else CallType.AUDIO
-        )
-        IncomingCallBus.emitIncomingCall(invite)
-        AyerNotificationManager.sendIncomingCallNotification(
-            context = getApplication(),
-            callId = invite.callId,
-            callerName = invite.callerName,
-            isVideo = isVideo
-        )
-    }
+
 
     fun disposeWebRTCResources() {
         try {
@@ -1661,7 +2037,7 @@ class AyerViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun getSubAgents(): List<com.example.data.model.SubAgentItem> = repository.getSampleSubAgents()
+    fun getSubAgents(): List<com.example.data.model.SubAgentItem> = repository.getSubAgents()
 
     fun clearNotice() {
         _uiNotice.value = null
@@ -1669,10 +2045,10 @@ class AyerViewModel(application: Application) : AndroidViewModel(application) {
 
     fun getCoinPackages(): List<CoinPackage> = repository.getAvailableCoinPackages()
     fun getGifts(): List<GiftItem> = repository.getAvailableGifts()
-    fun getLiveStreams(): List<LiveStreamRoom> = _liveStreams.value
+    fun getLiveStreams(): List<LiveStreamRoom> = liveStreams.value
 
     fun updateStreamPreviewClip(streamId: String, newTitle: String, agencyName: String, durationSeconds: Int = 4) {
-        _liveStreams.value = _liveStreams.value.map { stream ->
+        _rawLiveStreams.value = _rawLiveStreams.value.map { stream ->
             if (stream.id == streamId) {
                 stream.copy(
                     previewClipTitle = newTitle,
@@ -1689,7 +2065,7 @@ class AyerViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun addAgencyStreamFromAdmin(stream: LiveStreamRoom) {
-        _liveStreams.value = listOf(stream) + _liveStreams.value
+        _rawLiveStreams.value = listOf(stream) + _rawLiveStreams.value
         _uiNotice.value = "تمت إضافة بث الوكالة الجديد للشريط المتحرك خلف الكرة الأرضية!"
     }
 
@@ -1768,179 +2144,307 @@ class AyerViewModel(application: Application) : AndroidViewModel(application) {
         scope: LeaderboardScope = LeaderboardScope.GLOBAL,
         timeframe: LeaderboardTimeframe = LeaderboardTimeframe.THIS_WEEK
     ): List<CreatorLeaderboardItem> {
-        val userPoints = userProfile.value?.pointsBalance ?: 250
-        return repository.getCreatorsLeaderboard(scope, timeframe, userPoints)
+        val user = userProfile.value ?: return emptyList()
+        if (user.uid.isBlank() && user.name.isBlank()) return emptyList()
+        if (scope == LeaderboardScope.AGENCY && user.agencyName.isBlank()) return emptyList()
+        val factor = when (timeframe) {
+            LeaderboardTimeframe.TODAY -> 0.25f
+            LeaderboardTimeframe.THIS_WEEK -> 0.6f
+            LeaderboardTimeframe.ALL_TIME -> 1.0f
+        }
+        return listOf(
+            CreatorLeaderboardItem(
+                rank = 1,
+                id = user.uid.ifBlank { "user_self" },
+                name = user.name.ifBlank { "حسابك" },
+                country = user.country.ifBlank { "غير محدد" },
+                countryCode = user.countryCode.ifBlank { "SA" },
+                agencyName = user.agencyName.ifBlank { "بدون وكالة" },
+                pointsAccumulated = (user.pointsBalance * factor).toInt(),
+                followersCount = 0,
+                isLiveNow = false,
+                isCurrentUser = true
+            )
+        )
     }
 
     // ==========================================
-    // Firebase Auth Methods
+    // Firebase Auth & +18 Age Verification Methods
     // ==========================================
 
-    fun loginUser(email: String, pass: String, onResult: (Boolean, String?) -> Unit) {
-        if (auth == null) {
-            // Mock mode when Firebase is not configured
-            _isUserLoggedIn.value = true
-            _uiNotice.value = "تم تسجيل الدخول محلياً (وضع التجربة - Firebase غير متصل)"
-            onResult(true, null)
+    fun submitAgeVerification(dob: String, acceptedTerms: Boolean, acceptedPrivacy: Boolean) {
+        val firebaseUser = auth?.currentUser
+        if (firebaseUser == null) {
+            _ageVerificationError.value = "يلزم تسجيل الدخول أولاً."
             return
         }
-        auth.signInWithEmailAndPassword(email, pass)
-            .addOnCompleteListener { task ->
-                if (task.isSuccessful) {
-                    _isUserLoggedIn.value = true
-                    onResult(true, null)
-                } else {
-                    onResult(false, task.exception?.message ?: "فشل تسجيل الدخول")
+        viewModelScope.launch {
+            _isSubmittingAgeVerification.value = true
+            _ageVerificationError.value = null
+            val displayName = userProfile.value?.name?.takeIf { it.isNotBlank() }
+                ?: firebaseUser.displayName
+                ?: firebaseUser.email?.substringBefore('@')
+                ?: "مستخدم HUH"
+            val result = repository.submitAgeVerification(
+                uid = firebaseUser.uid,
+                displayName = displayName,
+                email = firebaseUser.email.orEmpty(),
+                dobInput = dob,
+                acceptedTerms = acceptedTerms,
+                acceptedPrivacy = acceptedPrivacy
+            )
+            _isSubmittingAgeVerification.value = false
+            result.fold(
+                onSuccess = {
+                    _uiNotice.value = "تم إرسال طلب التحقق (+18) بنجاح وهو بانتظار مراجعة الإدارة."
+                },
+                onFailure = { err ->
+                    _ageVerificationError.value = err.message ?: "تعذر إرسال طلب التحقق."
                 }
-            }
-    }
-
-    fun registerUser(email: String, pass: String, onResult: (Boolean, String?) -> Unit) {
-        if (auth == null) {
-            // Mock mode when Firebase is not configured
-            _isUserLoggedIn.value = true
-            _uiNotice.value = "تم إنشاء الحساب محلياً (وضع التجربة - Firebase غير متصل)"
-            onResult(true, null)
-            return
+            )
         }
-        auth.createUserWithEmailAndPassword(email, pass)
-            .addOnCompleteListener { task ->
-                if (task.isSuccessful) {
-                    _isUserLoggedIn.value = true
-                    onResult(true, null)
-                } else {
-                    onResult(false, task.exception?.message ?: "فشل إنشاء الحساب")
-                }
-            }
     }
 
     fun getCurrentUserEmail(): String? {
         return auth?.currentUser?.email
     }
 
-    fun logoutUser() {
-        auth?.signOut()
-        _isUserLoggedIn.value = false
+    fun logoutUser(credentialManager: CredentialManager? = null) {
+        firestoreChatJob?.cancel()
+        firestoreChatJob = null
+        callTimerJob?.cancel()
+        callTimerJob = null
+        callSignalingObserverJob?.cancel()
+        callSignalingObserverJob = null
+        outgoingRingJob?.cancel()
+        outgoingRingJob = null
+        authSessionSyncJob?.cancel()
+        authSessionSyncJob = null
+        privateChatJob?.cancel()
+        privateChatJob = null
+
+        viewModelScope.launch {
+            withContext(NonCancellable) {
+                val cm = credentialManager ?: runCatching { CredentialManager.create(getApplication()) }.getOrNull()
+                if (cm != null) {
+                    runCatching { cm.clearCredentialState(ClearCredentialStateRequest()) }
+                }
+                auth?.signOut()
+                repository.clearLocalSessionData()
+                _activeSecondaryProfile.value = null
+                _rawFriendsList.value = emptyList()
+                _firestoreBlockedUsers.value = emptySet()
+                _privateChatMessages.value = emptyMap()
+                _ageVerificationSubmission.value = null
+                _isUserLoggedIn.value = false
+            }
+        }
     }
 
     // ==========================================
-    // Friendship & Private Chat System
+    // Friendship & Private Chat System (Firestore-backed + Privacy Enforced)
     // ==========================================
 
-    private val _friendsList = MutableStateFlow<List<FriendItem>>(
-        listOf(
-            FriendItem("f1", "سارة أحمد", "دبي، الإمارات", 23, null, FriendshipStatus.ACCEPTED, "مرحبًا! هل شاهدت البث الأخير؟", 2, true),
-            FriendItem("f2", "خالد المنصور", "الرياض، السعودية", 26, null, FriendshipStatus.ACCEPTED, "أرسل لك صورة سرية 📸", 0, true),
-            FriendItem("f3", "نور الهدى", "القاهرة، مصر", 22, null, FriendshipStatus.PENDING_INCOMING, "أريد إضافتك كصديق", 1, false)
-        )
-    )
-    val friendsList = _friendsList.asStateFlow()
+    fun currentUserUid(): String = auth?.currentUser?.uid ?: userProfile.value?.uid.orEmpty()
 
-    private val _privateChatMessages = MutableStateFlow<Map<String, List<PrivateChatMessage>>>(
-        mapOf(
-            "f1" to listOf(
-                PrivateChatMessage(id = "m1", senderId = "f1", text = "مرحبًا! هل شاهدت البث الأخير؟", textColorHex = "#FFFFFF", bgColorHex = "#1E1B2E", timestamp = System.currentTimeMillis() - 100000),
-                PrivateChatMessage(id = "m2", senderId = "me", text = "أهلاً سارة، نعم كان مذهلاً!", textColorHex = "#FFFFFF", bgColorHex = "#3B82F6", timestamp = System.currentTimeMillis() - 50000)
-            ),
-            "f2" to listOf(
-                PrivateChatMessage(id = "m3", senderId = "f2", text = "تحقق من هذه الصورة الخاصة", textColorHex = "#FFFFFF", bgColorHex = "#1E1B2E", mediaResId = R.drawable.ic_ayer_logo, mediaPriceCoins = 50, isUnlocked = false, unlockProgress = 0f, timestamp = System.currentTimeMillis() - 20000)
-            )
-        )
-    )
-    val privateChatMessages = _privateChatMessages.asStateFlow()
+    fun openPrivateChat(friendId: String) {
+        val myUid = currentUserUid()
+        if (myUid.isBlank() || friendId.isBlank()) return
+        if (activePrivateChatFriendId == friendId && privateChatJob?.isActive == true) return
+        activePrivateChatFriendId = friendId
+        privateChatJob?.cancel()
+        privateChatJob = viewModelScope.launch {
+            repository.observePrivateChatMessages(myUid, friendId).collect { msgs ->
+                val map = _privateChatMessages.value.toMutableMap()
+                map[friendId] = msgs
+                _privateChatMessages.value = map
+            }
+        }
+    }
+
+    fun closePrivateChat() {
+        privateChatJob?.cancel()
+        privateChatJob = null
+        activePrivateChatFriendId = null
+    }
 
     fun sendFriendRequest(name: String, country: String) {
-        val newFriend = FriendItem(
-            id = "f_${System.currentTimeMillis()}",
-            name = name,
-            country = country,
-            status = FriendshipStatus.PENDING_OUTGOING,
-            lastMessage = "تم إرسال طلب الصداقة"
-        )
-        _friendsList.value = _friendsList.value + newFriend
-        _uiNotice.value = "تم إرسال طلب الصداقة بنجاح إلى $name"
+        sendFriendRequest(targetUid = "", name = name, country = country)
+    }
+
+    fun sendFriendRequest(targetUid: String, name: String, country: String) {
+        val myUid = currentUserUid()
+        if (targetUid.isBlank() || myUid.isBlank()) {
+            _uiNotice.value = "يلزم معرّف مستخدم صالح لإرسال طلب الصداقة."
+            return
+        }
+        val myName = userProfile.value?.name?.ifBlank { "مستخدم HUH" } ?: "مستخدم HUH"
+        val myCountry = userProfile.value?.country?.ifBlank { "العالم" } ?: "العالم"
+        viewModelScope.launch {
+            val res = repository.sendFriendRequest(
+                targetUid = targetUid,
+                targetName = name,
+                targetCountry = country,
+                myName = myName,
+                myCountry = myCountry
+            )
+            _uiNotice.value = if (res.isSuccess) {
+                "تم إرسال طلب الصداقة إلى $name ✅"
+            } else {
+                res.exceptionOrNull()?.message ?: "تعذر إرسال طلب الصداقة"
+            }
+        }
     }
 
     fun acceptFriendRequest(friendId: String) {
-        _friendsList.value = _friendsList.value.map {
-            if (it.id == friendId) it.copy(status = FriendshipStatus.ACCEPTED, lastMessage = "تم قبول الصداقة الآن") else it
+        val myName = userProfile.value?.name?.ifBlank { "مستخدم HUH" } ?: "مستخدم HUH"
+        val myCountry = userProfile.value?.country?.ifBlank { "العالم" } ?: "العالم"
+        viewModelScope.launch {
+            val res = repository.acceptFriendRequest(friendId, myName, myCountry)
+            if (res.isSuccess) {
+                _rawFriendsList.value = _rawFriendsList.value.map {
+                    if (it.id == friendId) it.copy(status = FriendshipStatus.ACCEPTED, lastMessage = "تم قبول الصداقة الآن") else it
+                }
+                _uiNotice.value = "تم قبول طلب الصداقة بنجاح!"
+            } else {
+                _uiNotice.value = res.exceptionOrNull()?.message ?: "تعذر قبول الطلب"
+            }
         }
-        _uiNotice.value = "تم قبول طلب الصداقة بنجاح!"
     }
 
     fun rejectFriendRequest(friendId: String) {
-        _friendsList.value = _friendsList.value.filter { it.id != friendId }
-        _uiNotice.value = "تم رفض طلب الصداقة"
+        viewModelScope.launch {
+            repository.rejectOrUnfriend(friendId)
+            _rawFriendsList.value = _rawFriendsList.value.filter { it.id != friendId }
+            _uiNotice.value = "تم رفض طلب الصداقة"
+        }
     }
 
     fun blockFriend(friendId: String) {
-        _friendsList.value = _friendsList.value.map {
-            if (it.id == friendId) it.copy(status = FriendshipStatus.BLOCKED, lastMessage = "تم حظر المستخدم") else it
+        viewModelScope.launch {
+            repository.blockUser(friendId)
+            _rawFriendsList.value = _rawFriendsList.value.map {
+                if (it.id == friendId) it.copy(status = FriendshipStatus.BLOCKED, lastMessage = "تم حظر المستخدم") else it
+            }
+            _uiNotice.value = "تم حظر المستخدم وإخفاء جميع تفاعلاته 🛡️"
         }
-        _uiNotice.value = "تم حظر المستخدم بنجاح"
     }
 
     fun unfriend(friendId: String) {
-        _friendsList.value = _friendsList.value.filter { it.id != friendId }
-        _uiNotice.value = "تمت إزالة الصداقة بنجاح"
+        viewModelScope.launch {
+            repository.rejectOrUnfriend(friendId)
+            _rawFriendsList.value = _rawFriendsList.value.filter { it.id != friendId }
+            _uiNotice.value = "تمت إزالة الصداقة بنجاح"
+        }
+    }
+
+    private suspend fun verifyPrivateMessageAllowed(friendId: String): Boolean {
+        if (blockedUserIds.value.contains(friendId)) {
+            _uiNotice.value = "هذا المستخدم محظور ولا يمكن مراسلته 🚫"
+            return false
+        }
+        val isFriend = _rawFriendsList.value.any { it.id == friendId && it.status == FriendshipStatus.ACCEPTED }
+        val isVerified = userProfile.value?.ageVerified == true
+        val check = repository.canSendDirectMessage(friendId, isFriend, isVerified)
+        if (check.isFailure) {
+            _uiNotice.value = check.exceptionOrNull()?.message ?: "خصوصية المستخدم تمنع الرسائل الخاصة."
+            return false
+        }
+        return true
     }
 
     fun sendPrivateTextMessage(friendId: String, text: String, textColor: String, bgColor: String) {
         if (text.isBlank()) return
-        val newMsg = PrivateChatMessage(
-            senderId = "me",
-            text = text,
-            textColorHex = textColor,
-            bgColorHex = bgColor,
-            timestamp = System.currentTimeMillis()
-        )
-        val currentMap = _privateChatMessages.value.toMutableMap()
-        val currentList = currentMap[friendId] ?: emptyList()
-        currentMap[friendId] = currentList + newMsg
-        _privateChatMessages.value = currentMap
-
-        _friendsList.value = _friendsList.value.map {
-            if (it.id == friendId) it.copy(lastMessage = text) else it
+        val myUid = currentUserUid()
+        viewModelScope.launch {
+            if (!verifyPrivateMessageAllowed(friendId)) return@launch
+            val newMsg = PrivateChatMessage(
+                senderId = myUid.ifBlank { "me" },
+                text = text,
+                textColorHex = textColor,
+                bgColorHex = bgColor,
+                timestamp = System.currentTimeMillis()
+            )
+            val res = repository.sendPrivateMessage(friendId, newMsg, text)
+            if (res.isFailure) {
+                _uiNotice.value = res.exceptionOrNull()?.message ?: "تعذر إرسال الرسالة."
+            }
         }
     }
 
-    fun sendPrivateMediaMessage(friendId: String, mediaResId: Int, priceCoins: Int) {
-        val newMsg = PrivateChatMessage(
-            senderId = "me",
-            mediaResId = mediaResId,
-            mediaPriceCoins = priceCoins,
-            isUnlocked = false,
-            unlockProgress = 0f,
-            timestamp = System.currentTimeMillis()
-        )
-        val currentMap = _privateChatMessages.value.toMutableMap()
-        val currentList = currentMap[friendId] ?: emptyList()
-        currentMap[friendId] = currentList + newMsg
-        _privateChatMessages.value = currentMap
-
-        _friendsList.value = _friendsList.value.map {
-            if (it.id == friendId) it.copy(lastMessage = "📷 صورة مغلقة ($priceCoins نقطة)") else it
+    fun sendPrivateMediaMessage(
+        friendId: String,
+        mediaUri: String,
+        priceCoins: Int,
+        mediaResId: Int? = null
+    ) {
+        val myUid = currentUserUid()
+        viewModelScope.launch {
+            if (!verifyPrivateMessageAllowed(friendId)) return@launch
+            val newMsg = PrivateChatMessage(
+                senderId = myUid.ifBlank { "me" },
+                mediaResId = mediaResId,
+                mediaUri = mediaUri,
+                mediaPriceCoins = priceCoins.coerceAtLeast(1),
+                isUnlocked = false,
+                unlockProgress = 0f,
+                timestamp = System.currentTimeMillis()
+            )
+            val res = repository.sendPrivateMessage(
+                friendId,
+                newMsg,
+                "📷 صورة خاصة مغلقة (${newMsg.mediaPriceCoins} نقطة)"
+            )
+            _uiNotice.value = if (res.isSuccess) {
+                "تم إرسال الصورة المغلقة مقابل ${newMsg.mediaPriceCoins} نقطة بنجاح"
+            } else {
+                res.exceptionOrNull()?.message ?: "تعذر إرسال الصورة."
+            }
         }
-        _uiNotice.value = "تم إرسال الصورة المغلقة مقابل $priceCoins نقطة بنجاح"
     }
 
-    fun sendVoiceMessage(friendId: String, durationSec: Int) {
-        val newMsg = PrivateChatMessage(
-            senderId = "me",
-            text = "🎤 رسالة صوتية ($durationSec ثانية)",
-            isVoiceMessage = true,
-            voiceDurationSeconds = durationSec,
-            timestamp = System.currentTimeMillis()
-        )
-        val currentMap = _privateChatMessages.value.toMutableMap()
-        val currentList = currentMap[friendId] ?: emptyList()
-        currentMap[friendId] = currentList + newMsg
-        _privateChatMessages.value = currentMap
-
-        _friendsList.value = _friendsList.value.map {
-            if (it.id == friendId) it.copy(lastMessage = "🎤 رسالة صوتية") else it
+    fun sendVoiceMessage(
+        friendId: String,
+        durationSec: Int,
+        voiceFilePath: String? = null,
+        voiceAudioBase64: String? = null
+    ) {
+        val myUid = currentUserUid()
+        viewModelScope.launch {
+            if (!verifyPrivateMessageAllowed(friendId)) return@launch
+            val newMsg = PrivateChatMessage(
+                senderId = myUid.ifBlank { "me" },
+                text = "🎤 رسالة صوتية (${durationSec} ثانية)",
+                isVoiceMessage = true,
+                voiceDurationSeconds = durationSec,
+                voiceFilePath = voiceFilePath,
+                voiceAudioBase64 = voiceAudioBase64,
+                timestamp = System.currentTimeMillis()
+            )
+            val res = repository.sendPrivateMessage(friendId, newMsg, "🎤 رسالة صوتية (${durationSec}ث)")
+            _uiNotice.value = if (res.isSuccess) {
+                "تم إرسال الرسالة الصوتية بنجاح"
+            } else {
+                res.exceptionOrNull()?.message ?: "تعذر إرسال الرسالة الصوتية."
+            }
         }
-        _uiNotice.value = "تم إرسال الرسالة الصوتية بنجاح"
+    }
+
+    fun translatePrivateMessage(friendId: String, messageId: String, text: String) {
+        val targetLang = if (_appLanguage.value == AppLanguage.ARABIC) "Arabic" else "English"
+        viewModelScope.launch {
+            val res = aiTranslationService.translateText(text, targetLang)
+            res.onSuccess { translated ->
+                repository.updatePrivateMessageTranslation(friendId, messageId, translated)
+                val map = _privateChatMessages.value.toMutableMap()
+                map[friendId] = (map[friendId] ?: emptyList()).map {
+                    if (it.id == messageId) it.copy(translatedText = translated) else it
+                }
+                _privateChatMessages.value = map
+            }.onFailure { err ->
+                _uiNotice.value = err.message ?: "تعذر ترجمة الرسالة."
+            }
+        }
     }
 
     fun startCallWithFriend(friend: FriendItem, isVideo: Boolean) {
@@ -1950,7 +2454,7 @@ class AyerViewModel(application: Application) : AndroidViewModel(application) {
             age = friend.age,
             country = friend.country,
             countryCode = "AE",
-            gender = "FEMALE",
+            gender = "ANY",
             language = "العربية",
             bio = "صديق مقرب",
             interests = listOf("دردشة", "تعارف"),
@@ -1974,8 +2478,9 @@ class AyerViewModel(application: Application) : AndroidViewModel(application) {
             CallLifecycleState.BLOCKED_BUDGET.name -> "تعذر إجراء $callLabel (سياسة الميزانية)"
             else -> "$callLabel لم تكتمل"
         }
+        val myUid = currentUserUid()
         val msg = PrivateChatMessage(
-            senderId = "me",
+            senderId = myUid.ifBlank { "me" },
             text = statusSummary,
             callLogRecordId = callId,
             callLogIsVideo = isVideo,
@@ -1987,20 +2492,22 @@ class AyerViewModel(application: Application) : AndroidViewModel(application) {
         val currentList = currentMap[friendId] ?: emptyList()
         currentMap[friendId] = currentList + msg
         _privateChatMessages.value = currentMap
-
-        _friendsList.value = _friendsList.value.map {
-            if (it.id == friendId) it.copy(lastMessage = statusSummary) else it
+        viewModelScope.launch {
+            repository.sendPrivateMessage(friendId, msg, statusSummary)
         }
     }
 
     fun clearChatHistory(friendId: String) {
-        val currentMap = _privateChatMessages.value.toMutableMap()
-        currentMap[friendId] = emptyList()
-        _privateChatMessages.value = currentMap
-        _uiNotice.value = "تم مسح سجل المحادثة بنجاح"
+        viewModelScope.launch {
+            repository.clearOwnPrivateChatMessages(friendId)
+            val currentMap = _privateChatMessages.value.toMutableMap()
+            currentMap[friendId] = emptyList()
+            _privateChatMessages.value = currentMap
+            _uiNotice.value = "تم مسح سجل رسائلك في المحادثة بنجاح"
+        }
     }
 
-    // Privacy Settings State Management
+    // Privacy Settings State Management (Firestore-backed)
     private val _profileVisibility = MutableStateFlow(com.example.data.model.ProfileVisibilityOption.PUBLIC)
     val profileVisibility = _profileVisibility.asStateFlow()
 
@@ -2013,31 +2520,49 @@ class AyerViewModel(application: Application) : AndroidViewModel(application) {
     private val _hideLocationInMatch = MutableStateFlow(false)
     val hideLocationInMatch = _hideLocationInMatch.asStateFlow()
 
+    private fun persistPrivacyToFirestore() {
+        val uid = currentUserUid()
+        if (uid.isBlank()) return
+        viewModelScope.launch {
+            repository.updatePrivacySettings(
+                uid = uid,
+                profileVisibility = _profileVisibility.value.name,
+                directMessagePermission = _directMessagePermission.value.name,
+                showOnlineStatus = _showOnlineStatus.value,
+                hideLocationInMatch = _hideLocationInMatch.value
+            )
+        }
+    }
+
     fun setProfileVisibility(option: com.example.data.model.ProfileVisibilityOption) {
         _profileVisibility.value = option
-        _uiNotice.value = "تم تحديث رؤية البروفايل إلى: ${option.title} 🔒"
+        persistPrivacyToFirestore()
+        _uiNotice.value = "تم حفظ رؤية البروفايل: ${option.title} 🔒"
     }
 
     fun setDirectMessagePermission(permission: com.example.data.model.DirectMessagePermission) {
         _directMessagePermission.value = permission
-        _uiNotice.value = "تم تحديد صلاحيات الرسائل الخاصة: ${permission.title} 💬"
+        persistPrivacyToFirestore()
+        _uiNotice.value = "تم حفظ صلاحيات الرسائل الخاصة: ${permission.title} 💬"
     }
 
     fun setShowOnlineStatus(enabled: Boolean) {
         _showOnlineStatus.value = enabled
-        _uiNotice.value = if (enabled) "حالة الاتصال بالإنترنت ظاهرة الآن للجميع 🟢" else "تم إخفاء حالة الاتصال بالإنترنت 👁️‍🗨️"
+        persistPrivacyToFirestore()
+        _uiNotice.value = if (enabled) "حالة الاتصال بالإنترنت ظاهرة الآن 🟢" else "تم إخفاء حالة الاتصال 👁️‍🗨️"
     }
 
     fun setHideLocationInMatch(enabled: Boolean) {
         _hideLocationInMatch.value = enabled
-        _uiNotice.value = if (enabled) "تم إخفاء الدولة والمدينة أثناء البحث العشوائي 🌍" else "سيتم إظهار الدولة والمدينة في المطابقة 📍"
+        persistPrivacyToFirestore()
+        _uiNotice.value = if (enabled) "تم إخفاء الدولة والمدينة في المطابقة 🌍" else "سيتم إظهار الدولة والمدينة 📍"
     }
 
     fun submitUserReport(targetUserId: String, targetUserName: String, reason: String, details: String) {
         viewModelScope.launch {
             val me = userProfile.value
-            val reporterId = me?.id?.toString() ?: "1"
-            val reporterName = me?.name ?: "مستخدم Ayer"
+            val reporterId = auth?.currentUser?.uid ?: me?.uid.orEmpty()
+            val reporterName = me?.name?.ifBlank { "مستخدم HUH" } ?: "مستخدم HUH"
 
             val report = com.example.data.model.UserProfileReport(
                 targetUserId = targetUserId,
@@ -2047,46 +2572,52 @@ class AyerViewModel(application: Application) : AndroidViewModel(application) {
                 reason = reason,
                 details = details
             )
-            repository.submitUserProfileReport(report)
-            _uiNotice.value = "تم إرسال البلاغ إلى فريق الإشراف وسيتم مراجعة الحساب خلال 24 ساعة 🛡️"
+            val res = repository.submitUserProfileReport(report)
+            _uiNotice.value = if (res.isSuccess) {
+                "تم إرسال البلاغ إلى فريق الإشراف وسيتم مراجعة الحساب 🛡️"
+            } else {
+                "تعذر إرسال البلاغ، يرجى المحاولة لاحقاً."
+            }
         }
     }
 
-    fun reportFriend(friendId: String) {
-        _uiNotice.value = "تم إرسال البلاغ بنجاح. سيتم مراجعة الحساب لحماية أمن المنصة."
+    fun reportFriend(friendId: String, friendName: String = "مستخدم", reason: String = "سلوك غير لائق", details: String = "") {
+        submitUserReport(friendId, friendName, reason, details)
     }
 
     fun unlockMediaMessage(friendId: String, messageId: String, price: Int) {
         val currentProfile = userProfile.value
-        if (currentProfile != null && currentProfile.pointsBalance < price) {
-            _uiNotice.value = "عذراً، رصيدك الحالي من النقاط لا يكفي لفتح هذه الصورة ($price نقطة مطلوبة)"
+        if (currentProfile == null || currentProfile.pointsBalance < price) {
+            _uiNotice.value = "عذراً، رصيدك الحالي من النقاط لا يكفي لفتح هذا المحتوى ($price نقطة مطلوبة)"
             return
         }
 
-        if (currentProfile != null) {
-            viewModelScope.launch {
-                repository.adjustPoints(-price)
-                repository.addTransaction(
-                    title = "شراء محتوى خاص مغلق",
-                    type = "SPEND",
-                    amount = -price
-                )
-                repository.adjustPoints(price)
-                repository.addTransaction(
-                    title = "أرباح بيع محتوى خاص",
-                    type = "EARN",
-                    amount = price
-                )
+        viewModelScope.launch {
+            val paid = repository.sendGift(
+                gift = GiftItem(
+                    id = "media_$messageId",
+                    name = "محتوى خاص",
+                    pointsCost = price,
+                    emoji = "🔓",
+                    soundEffectDesc = "فتح محتوى خاص"
+                ),
+                streamHost = friendId,
+                recipientUid = friendId,
+                streamId = messageId
+            )
+            if (paid) {
+                repository.markPrivateMediaUnlocked(friendId, messageId)
+                val currentMap = _privateChatMessages.value.toMutableMap()
+                val currentList = currentMap[friendId] ?: emptyList()
+                currentMap[friendId] = currentList.map { msg ->
+                    if (msg.id == messageId) msg.copy(isUnlocked = true, unlockProgress = 1f) else msg
+                }
+                _privateChatMessages.value = currentMap
+                _uiNotice.value = "تم خصم $price نقطة وفتح المحتوى بنجاح!"
+            } else {
+                _uiNotice.value = "تعذر إتمام عملية الدفع لفتح المحتوى."
             }
         }
-
-        val currentMap = _privateChatMessages.value.toMutableMap()
-        val currentList = currentMap[friendId] ?: emptyList()
-        currentMap[friendId] = currentList.map { msg ->
-            if (msg.id == messageId) msg.copy(isUnlocked = true, unlockProgress = 1f) else msg
-        }
-        _privateChatMessages.value = currentMap
-        _uiNotice.value = "تم خصم $price نقطة وفتح الصورة بنجاح وتوجيه الأرباح للمرسل!"
     }
 
     fun clearUiNotice() {
@@ -2095,6 +2626,7 @@ class AyerViewModel(application: Application) : AndroidViewModel(application) {
 
     override fun onCleared() {
         super.onCleared()
+        runCatching { playBillingManager.endConnection() }
         try {
             callLiveKitEngine.disconnect()
         } catch (_: Throwable) {}

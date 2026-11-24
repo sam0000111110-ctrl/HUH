@@ -45,11 +45,17 @@ android {
   buildTypes {
     release {
       isCrunchPngs = false
-      isMinifyEnabled = false
+      isMinifyEnabled = true
+      isShrinkResources = true
       proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
       signingConfig = signingConfigs.getByName("release")
     }
     debug { signingConfig = signingConfigs.getByName("debugConfig") }
+  }
+  packaging {
+    jniLibs {
+      useLegacyPackaging = false
+    }
   }
   compileOptions {
     sourceCompatibility = JavaVersion.VERSION_11
@@ -59,7 +65,14 @@ android {
     compose = true
     buildConfig = true
   }
-  testOptions { unitTests { isIncludeAndroidResources = true } }
+  testOptions {
+    unitTests {
+      isIncludeAndroidResources = true
+      all {
+        it.forkEvery = 1
+      }
+    }
+  }
   dependenciesInfo {
     includeInApk = false
     includeInBundle = true
@@ -94,7 +107,7 @@ dependencies {
   implementation(libs.androidx.compose.ui.graphics)
   implementation(libs.androidx.compose.ui.tooling.preview)
   implementation(libs.androidx.core.ktx)
-  // implementation(libs.androidx.datastore.preferences)
+  implementation(libs.androidx.datastore.preferences)
   implementation(libs.androidx.lifecycle.runtime.compose)
   implementation(libs.androidx.lifecycle.runtime.ktx)
   implementation(libs.androidx.lifecycle.viewmodel.compose)
@@ -108,9 +121,10 @@ dependencies {
   implementation(libs.firebase.firestore)
   // Firebase Cloud Messaging (FCM) for push notifications:
   implementation(libs.firebase.messaging)
-  // Google Play In-App Review API:
+  // Google Play In-App Review & Billing APIs:
   implementation(libs.play.review)
   implementation(libs.play.review.ktx)
+  implementation(libs.billing.ktx)
 
   // Uncomment ALL FOUR of the following dependencies together to use Firebase Auth and Google
   // Sign-In via Credential Manager:

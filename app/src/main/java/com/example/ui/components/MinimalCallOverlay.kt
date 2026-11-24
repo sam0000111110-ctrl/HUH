@@ -89,7 +89,6 @@ fun MinimalCallOverlay(
     onSetQualityMode: (CallQualityMode) -> Unit,
     onToggleAudioPriority: () -> Unit,
     onToggleTranslation: () -> Unit,
-    onSimulateNetworkWeakness: () -> Unit,
     onEndCall: () -> Unit
 ) {
     var controlsVisible by remember { mutableStateOf(true) }
@@ -214,7 +213,8 @@ fun MinimalCallOverlay(
         }
 
         // Live Call Translated Subtitles (Centered bottom above controls)
-        if (callSession.isTranslationEnabled && callSession.simulatedSubtitles != null) {
+        val subtitlesText = callSession.liveSubtitles
+        if (callSession.isTranslationEnabled && !subtitlesText.isNullOrBlank()) {
             Box(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
@@ -232,7 +232,7 @@ fun MinimalCallOverlay(
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = callSession.simulatedSubtitles,
+                        text = subtitlesText,
                         color = Color.White,
                         fontSize = 13.sp,
                         fontWeight = FontWeight.Medium,
@@ -590,37 +590,6 @@ fun MinimalCallOverlay(
                         onCheckedChange = { onToggleTranslation() },
                         colors = SwitchDefaults.colors(checkedThumbColor = AyerPrimary)
                     )
-                }
-
-                Spacer(modifier = Modifier.height(10.dp))
-
-                // Simulate Network Weakness Button
-                Card(
-                    onClick = onSimulateNetworkWeakness,
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = CardDefaults.cardColors(containerColor = Color(0xFF371E20)),
-                    shape = RoundedCornerShape(12.dp)
-                ) {
-                    Row(
-                        modifier = Modifier.padding(12.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(imageVector = Icons.Default.NetworkCheck, contentDescription = null, tint = Color.Yellow)
-                        Spacer(modifier = Modifier.width(10.dp))
-                        Column {
-                            Text(
-                                text = if (callSession.isNetworkWeak) "إلغاء محاكاة ضعف الشبكة (إعادة الاستقرار)" else "محاكاة ضعف الشبكة (اختبار هبوط LiveKit التلقائي)",
-                                color = Color.White,
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                            Text(
-                                text = "توضيح عملي لكيفية حماية الصوت عند انخفاض السرعة",
-                                color = Color.LightGray,
-                                fontSize = 10.sp
-                            )
-                        }
-                    }
                 }
 
                 Spacer(modifier = Modifier.height(24.dp))

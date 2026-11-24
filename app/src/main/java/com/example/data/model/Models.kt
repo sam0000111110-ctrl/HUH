@@ -1,58 +1,72 @@
 package com.example.data.model
 
+import androidx.annotation.Keep
 import androidx.room.Entity
 import androidx.room.PrimaryKey
+import com.google.firebase.Timestamp
+import com.google.firebase.firestore.DocumentId
+import com.google.firebase.firestore.IgnoreExtraProperties
+import com.google.firebase.firestore.PropertyName
+import com.google.firebase.firestore.ServerTimestamp
 
 @Entity(tableName = "users")
 data class UserProfile(
     @PrimaryKey val id: Long = 1L,
-    val name: String = "سامر",
-    val age: Int = 24,
-    val country: String = "المملكة العربية السعودية",
-    val countryCode: String = "SA",
-    val gender: String = "MALE",
-    val pointsBalance: Int = 1450,
-    val totalAccumulatedPoints: Int = 12500, // إجمالي النقاط التراكمية مدى الحياة
-    val totalPointsSpent: Int = 8900, // إجمالي النقاط المنفقة
+    val uid: String = "",
+    val name: String = "",
+    val age: Int = 0,
+    val country: String = "",
+    val countryCode: String = "",
+    val gender: String = "",
+    val pointsBalance: Int = 0,
+    val totalAccumulatedPoints: Int = 0,
+    val totalPointsSpent: Int = 0,
     val lastDailyClaimTime: Long = 0L,
-    val ageVerified: Boolean = true,
+    val ageVerified: Boolean = false,
+    val ageVerificationStatus: String = "UNVERIFIED", // UNVERIFIED, PENDING_REVIEW, APPROVED, REJECTED
+    val dob: String? = null,
+    val acceptedTermsAt: Long? = null,
+    val acceptedPrivacyAt: Long? = null,
     val isHost: Boolean = false,
-    val hostStatus: String = "APPROVED", // NONE, PENDING, APPROVED
-    val isAgent: Boolean = false, // زر الوكلاء لا يظهر الا بعد ترقية الحساب الى وكيل
-    val agentCommissionPercent: Int = 20, // نسبة أرباح الوكيل المحددة من لوحة الأدمن (20%)
-    val subAgentsEarningsCoins: Int = 3420, // أرباح الوكيل من الوكلاء والمضيفين المدعوين
-    val subAgentsCount: Int = 4,
-    val referralCode: String = "AYER-AGENT-77",
-    val agencyName: String = "الوكالة الماسية - Diamond Agency",
-    val agencyId: String = "AG-78901",
-    val agencyRole: String = "عضو مميز / وكيل معتمد",
-    val agencyJoinedDate: String = "15 يناير 2024",
-    val agencyManagerName: String = "أحمد الشريف",
-    val agencyActiveHostsCount: Int = 12,
-    val agencyMonthlyTargetProgress: Int = 82,
+    val hostStatus: String = "NONE", // NONE, PENDING, APPROVED
+    val isAgent: Boolean = false,
+    val isAdmin: Boolean = false,
+    val agentCommissionPercent: Int = 20,
+    val subAgentsEarningsCoins: Int = 0,
+    val subAgentsCount: Int = 0,
+    val referralCode: String = "",
+    val agencyName: String = "",
+    val agencyId: String = "",
+    val agencyRole: String = "",
+    val agencyJoinedDate: String = "",
+    val agencyManagerName: String = "",
+    val agencyActiveHostsCount: Int = 0,
+    val agencyMonthlyTargetProgress: Int = 0,
     val hostCommissionPercent: Int = 50,
-    val hostEarningsCoins: Int = 1850,
-    val totalMatchesCount: Int = 38,
-    val agencyLevel: String = "Lv.4 الماسي 💎",
-    val bio: String = "مستخدم ومضيف نشط في مجتمع Ayer للتعارف والبث المباشر 🌟",
-    val phoneNumber: String = "+966 50 123 4567",
-    val email: String = "sam0000111110@gmail.com",
+    val hostEarningsCoins: Int = 0,
+    val totalMatchesCount: Int = 0,
+    val agencyLevel: String = "Lv.1 🌟",
+    val bio: String = "",
+    val phoneNumber: String = "",
+    val email: String = "",
     val avatarResId: Int = com.example.R.drawable.img_user_avatar,
-    val avatarCustomUri: String? = null
+    val avatarCustomUri: String? = null,
+    val profileVisibility: String = "PUBLIC",
+    val directMessagePermission: String = "EVERYONE"
 )
 
 val UserProfile.currentAgencyLevel: String
     get() = if (agencyLevel.isNotBlank()) agencyLevel else if (isAgent) "Lv.4 الماسي 💎" else "Lv.1 🌟"
 
 data class UserEngagementState(
-    val dailyStreakDays: Int = 5,
-    val todayStreamMinutes: Int = 18,
+    val dailyStreakDays: Int = 0,
+    val todayStreamMinutes: Int = 0,
     val targetStreamMinutes: Int = 30,
-    val todayMatchesCount: Int = 4,
+    val todayMatchesCount: Int = 0,
     val targetMatchesCount: Int = 5,
-    val todayGiftsSent: Int = 2,
+    val todayGiftsSent: Int = 0,
     val targetGiftsSent: Int = 3,
-    val todayEngagementPoints: Int = 145,
+    val todayEngagementPoints: Int = 0,
     val dailyMilestoneClaimed: Boolean = false
 )
 
@@ -105,7 +119,9 @@ data class LiveStreamRoom(
     val previewClipSeconds: Int = 4,
     val previewClipTitle: String = "مقطع متحرك (4 ثوانٍ)",
     val previewBadge: String = "بث وكالة معتمد 💎",
-    val startedAt: Long = System.currentTimeMillis() - (12 * 60 * 1000L) // Default: started 12 mins ago
+    val startedAt: Long = System.currentTimeMillis() - (12 * 60 * 1000L),
+    val hostUid: String = "",
+    val roomName: String = ""
 )
 
 data class GiftItem(
@@ -161,7 +177,8 @@ data class CoinPackage(
     val bonusCoins: Int,
     val priceUsd: Double,
     val isPopular: Boolean = false,
-    val tag: String? = null
+    val tag: String? = null,
+    val productId: String = id
 )
 
 enum class NotificationType {
@@ -194,7 +211,7 @@ data class SecondaryProfile(
     val avatarResId: Int? = null,
     val bio: String = "بروفايل خاص محمي برمز سري",
     val notificationsEnabled: Boolean = false,
-    val pointsBalance: Int = 45,
+    val pointsBalance: Int = 0,
     val createdAt: Long = System.currentTimeMillis(),
     val lastAccessedAt: Long = System.currentTimeMillis(),
     val status: String = "ACTIVE" // ACTIVE, SUSPENDED
@@ -234,7 +251,7 @@ data class ActiveCallSession(
     val reconnectAttempt: Int = 0,
     val downgradedToAudio: Boolean = false,
     val statusHint: String? = null,
-    val simulatedSubtitles: String? = null
+    val liveSubtitles: String? = null
 )
 
 enum class FriendshipStatus {
@@ -251,23 +268,27 @@ data class FriendItem(
     val age: Int = 24,
     val avatarResId: Int? = null,
     val status: FriendshipStatus = FriendshipStatus.ACCEPTED,
-    val lastMessage: String = "مرحبًا! كيف حالك؟",
+    val lastMessage: String = "",
     val unreadCount: Int = 0,
     val isOnline: Boolean = true
 )
 
 data class PrivateChatMessage(
     val id: String = "msg_${System.currentTimeMillis()}_${(0..999).random()}",
-    val senderId: String, // "me" or friend's id
+    val senderId: String, // "me" or friend's uid
     val text: String? = null,
     val textColorHex: String = "#FFFFFF",
     val bgColorHex: String = "#1E1B2E",
     val mediaResId: Int? = null,
+    val mediaUri: String? = null,
     val mediaPriceCoins: Int = 0,
     val isUnlocked: Boolean = false,
     val unlockProgress: Float = 0f, // 0.0 to 1.0 scratch progress
     val isVoiceMessage: Boolean = false,
     val voiceDurationSeconds: Int = 5,
+    val voiceFilePath: String? = null,
+    val voiceAudioBase64: String? = null,
+    val translatedText: String? = null,
     val callLogRecordId: String? = null,
     val callLogIsVideo: Boolean = false,
     val callLogStatus: String? = null, // ENDED, REJECTED, MISSED, FAILED, BLOCKED_BUDGET
@@ -353,4 +374,80 @@ data class CreatorLeaderboardItem(
     val avatarResId: Int? = null,
     val isCurrentUser: Boolean = false
 )
+
+@Keep
+@IgnoreExtraProperties
+data class FirestoreUserDoc(
+    @DocumentId val id: String = "",
+    var uid: String = "",
+    var displayName: String = "",
+    var email: String = "",
+    var photoUrl: String? = null,
+    var bio: String = "",
+    var country: String = "",
+    var countryCode: String = "",
+    var gender: String = "",
+    var age: Int = 0,
+    var dob: String? = null,
+    var acceptedTermsAt: Timestamp? = null,
+    var acceptedPrivacyAt: Timestamp? = null,
+    var ageVerified: Boolean = false,
+    var ageVerificationStatus: String = "UNVERIFIED",
+    @get:PropertyName("isAdmin") @set:PropertyName("isAdmin")
+    var isAdmin: Boolean = false,
+    @get:PropertyName("isAgent") @set:PropertyName("isAgent")
+    var isAgent: Boolean = false,
+    @get:PropertyName("isHost") @set:PropertyName("isHost")
+    var isHost: Boolean = false,
+    var hostStatus: String = "NONE",
+    var agentCommissionPercent: Int = 20,
+    var hostCommissionPercent: Int = 50,
+    var pointsBalance: Int = 0,
+    var totalAccumulatedPoints: Int = 0,
+    var totalPointsSpent: Int = 0,
+    var hostEarningsCoins: Int = 0,
+    var subAgentsEarningsCoins: Int = 0,
+    var subAgentsCount: Int = 0,
+    var profileVisibility: String = "PUBLIC",
+    var directMessagePermission: String = "EVERYONE",
+    @ServerTimestamp var createdAt: Timestamp? = null,
+    @ServerTimestamp var updatedAt: Timestamp? = null
+)
+
+@Keep
+@IgnoreExtraProperties
+data class AgeVerificationSubmissionDoc(
+    @DocumentId val id: String = "",
+    var userId: String = "",
+    var displayName: String = "",
+    var email: String = "",
+    var dob: String = "",
+    var ageYears: Int = 0,
+    var status: String = "PENDING_REVIEW",
+    var rejectionReason: String? = null,
+    var reviewedBy: String? = null,
+    var acceptedTermsAt: Timestamp? = null,
+    var acceptedPrivacyAt: Timestamp? = null,
+    @ServerTimestamp var submittedAt: Timestamp? = null,
+    @ServerTimestamp var reviewedAt: Timestamp? = null
+)
+
+@Keep
+@IgnoreExtraProperties
+data class ModerationReportDoc(
+    @DocumentId val id: String = "",
+    var reportType: String = "USER_PROFILE",
+    var targetUserId: String? = null,
+    var targetUserName: String? = null,
+    var streamId: String? = null,
+    var streamTitle: String? = null,
+    var hostName: String? = null,
+    var reporterId: String = "",
+    var reporterName: String = "",
+    var reason: String = "",
+    var details: String = "",
+    var status: String = "PENDING_REVIEW",
+    @ServerTimestamp var createdAt: Timestamp? = null
+)
+
 

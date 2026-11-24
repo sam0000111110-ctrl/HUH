@@ -764,109 +764,51 @@ fun ProfileScreen(
             Spacer(modifier = Modifier.height(16.dp))
         }
 
-        // Section: Agent Promotion & Tier Management (Rule: Button only appears when promoted)
-        item {
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(20.dp),
-                colors = CardDefaults.cardColors(containerColor = HuhTheme.colors.surfaceElevated),
-                border = BorderStroke(
-                    1.dp,
-                    if (userProfile.isAgent) HuhTheme.colors.gold else HuhTheme.colors.primary.copy(alpha = 0.5f)
-                )
-            ) {
-                Column(modifier = Modifier.padding(18.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
+        if (userProfile.isAgent) {
+            item {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(20.dp),
+                    colors = CardDefaults.cardColors(containerColor = HuhTheme.colors.surfaceElevated),
+                    border = BorderStroke(1.dp, HuhTheme.colors.gold)
+                ) {
+                    Column(modifier = Modifier.padding(18.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Box(
                                 modifier = Modifier
                                     .size(38.dp)
                                     .background(
-                                        if (userProfile.isAgent) Brush.radialGradient(listOf(HuhTheme.colors.gold, HuhTheme.colors.primary))
-                                        else Brush.radialGradient(listOf(HuhTheme.colors.primary, HuhTheme.colors.secondary)),
+                                        Brush.radialGradient(listOf(HuhTheme.colors.gold, HuhTheme.colors.primary)),
                                         CircleShape
                                     ),
                                 contentAlignment = Alignment.Center
                             ) {
                                 Icon(
-                                    imageVector = if (userProfile.isAgent) Icons.Default.WorkspacePremium else Icons.Default.Business,
+                                    imageVector = Icons.Default.WorkspacePremium,
                                     contentDescription = null,
-                                    tint = if (userProfile.isAgent) Color.Black else Color.White,
+                                    tint = Color.Black,
                                     modifier = Modifier.size(22.dp)
                                 )
                             }
                             Spacer(modifier = Modifier.width(10.dp))
                             Column {
                                 Text(
-                                    text = if (userProfile.isAgent) "حسابك مرقى كـ 'وكيل معتمد' 🌟" else "ترقية حساب الإنفلونسر إلى وكيل",
+                                    text = "حسابك مرقّى كـ 'وكيل معتمد' 🌟",
                                     fontSize = 15.sp,
                                     fontWeight = FontWeight.Bold,
                                     color = HuhTheme.colors.textPrimary
                                 )
                                 Text(
-                                    text = if (userProfile.isAgent) "زر تبويب 'الوكالات' مفعّل الآن في الشريط السفلي" else "زر الوكالات لا يظهر إلا بعد الترقية المعتمدة",
+                                    text = "نسبة عمولتك المعتمدة: ${userProfile.agentCommissionPercent}%",
                                     fontSize = 11.sp,
-                                    color = if (userProfile.isAgent) HuhTheme.colors.gold else HuhTheme.colors.textSecondary
+                                    color = HuhTheme.colors.gold
                                 )
                             }
                         }
                     }
-
-                    Spacer(modifier = Modifier.height(12.dp))
-
-                    if (userProfile.isAgent) {
-                        Text(
-                            text = "بصفتك وكيلاً، لديك صلاحيات دعوة وكلاء فرعيين، ومتابعة أرباح المضيفين، وكسب ${userProfile.agentCommissionPercent}% عمولة مستمرة محددة من لوحة الأدمن.",
-                            fontSize = 12.sp,
-                            color = HuhTheme.colors.textSecondary,
-                            lineHeight = 17.sp
-                        )
-                        Spacer(modifier = Modifier.height(14.dp))
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(10.dp)
-                        ) {
-                            Button(
-                                onClick = { viewModel.downgradeAgentForTesting() },
-                                colors = ButtonDefaults.buttonColors(containerColor = HuhTheme.colors.surfaceVariant),
-                                shape = RoundedCornerShape(12.dp),
-                                modifier = Modifier.fillMaxWidth().testTag("downgrade_agent_button")
-                            ) {
-                                Text(text = "إلغاء ترقية الوكيل (لتجربة إخفاء الزر)", fontSize = 12.sp, color = HuhTheme.colors.textSecondary)
-                            }
-                        }
-                    } else {
-                        Text(
-                            text = "يمكن للإنفلونسر الترقية إلى وكيل لإتاحة تبويب 'الوكالات' في الشريط السفلي وكسب عمولات ضخمة ودعوة وكلاء آخرين لشبكته.",
-                            fontSize = 12.sp,
-                            color = HuhTheme.colors.textSecondary,
-                            lineHeight = 17.sp
-                        )
-                        Spacer(modifier = Modifier.height(14.dp))
-                        Button(
-                            onClick = { viewModel.upgradeToAgent() },
-                            colors = ButtonDefaults.buttonColors(containerColor = HuhTheme.colors.primary),
-                            shape = RoundedCornerShape(14.dp),
-                            modifier = Modifier.fillMaxWidth().testTag("upgrade_to_agent_button")
-                        ) {
-                            Icon(imageVector = Icons.Default.WorkspacePremium, contentDescription = null, tint = HuhTheme.colors.onPrimary)
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                text = "ترقية الحساب إلى 'وكيل' الآن (إظهار تبويب الوكالات)",
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = HuhTheme.colors.onPrimary
-                            )
-                        }
-                    }
                 }
+                Spacer(modifier = Modifier.height(16.dp))
             }
-
-            Spacer(modifier = Modifier.height(16.dp))
         }
 
         // Section: Security & Screen Capture Protection
@@ -901,7 +843,7 @@ fun ProfileScreen(
                                 color = HuhTheme.colors.textPrimary
                             )
                             Text(
-                                text = "مفعل نظامياً عبر FLAG_SECURE في نظام أندرويد",
+                                text = "مفعّل عبر FLAG_SECURE على الشاشات الحساسة",
                                 fontSize = 11.sp,
                                 color = HuhTheme.colors.success
                             )
@@ -909,7 +851,7 @@ fun ProfileScreen(
                     }
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
-                        text = "ميزة أمان Ayer تمنع تماماً برامج تصوير الشاشة وسجلات الفيديو من تسجيل المحادثات والبثوث الحية لضمان أقصى سرية واطمئنان لكافة الأعضاء والمضيفين.",
+                        text = "تُطبّق حماية منع التقاط وتسجيل الشاشة (FLAG_SECURE) تلقائياً أثناء المكالمات الفردية، الدردشة الخاصة، المحفظة، وبوابة الوكالات لحماية خصوصية الأعضاء.",
                         fontSize = 11.sp,
                         color = HuhTheme.colors.textSecondary,
                         lineHeight = 16.sp

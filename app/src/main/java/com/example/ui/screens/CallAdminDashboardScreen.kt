@@ -50,16 +50,17 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.ScrollableTabRow
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Tab
-import androidx.compose.material3.TabRow
 import androidx.compose.material3.TabRowDefaults
 import androidx.compose.material3.TabRowDefaults.tabIndicatorOffset
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -105,7 +106,14 @@ fun CallAdminDashboardScreen(
     BackHandler { onDismiss() }
 
     val snapshot by viewModel.callMonitoringSnapshot.collectAsStateWithLifecycle()
+    val ageQueue by viewModel.adminAgeVerifications.collectAsStateWithLifecycle()
+    val payoutsQueue by viewModel.adminPayouts.collectAsStateWithLifecycle()
+    val reportsQueue by viewModel.adminReports.collectAsStateWithLifecycle()
     var selectedTab by remember { mutableIntStateOf(0) }
+
+    LaunchedEffect(Unit) {
+        viewModel.loadAdminQueues()
+    }
 
     Scaffold(
         modifier = Modifier
@@ -171,8 +179,9 @@ fun CallAdminDashboardScreen(
                     }
                 }
 
-                TabRow(
+                ScrollableTabRow(
                     selectedTabIndex = selectedTab,
+                    edgePadding = 8.dp,
                     containerColor = HuhTheme.colors.surface,
                     contentColor = HuhTheme.colors.textPrimary,
                     indicator = { tabPositions ->
@@ -218,6 +227,22 @@ fun CallAdminDashboardScreen(
                             )
                         }
                     )
+                    Tab(
+                        selected = selectedTab == 3,
+                        onClick = {
+                            selectedTab = 3
+                            viewModel.loadAdminQueues()
+                        },
+                        text = {
+                            val pendingTotal = ageQueue.size + payoutsQueue.count { it.status == "PENDING_REVIEW" } + reportsQueue.size
+                            Text(
+                                text = if (pendingTotal > 0) "المراجعات ($pendingTotal)" else "المراجعات والحوكمة",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = if (selectedTab == 3) AyerGold else HuhTheme.colors.textSecondary
+                            )
+                        }
+                    )
                 }
             }
         }
@@ -236,17 +261,21 @@ fun CallAdminDashboardScreen(
                     onToggleUserVip = { uid, exempt -> viewModel.toggleUserVipExemption(uid, exempt) }
                 )
                 1 -> CallLogsTab(logs = snapshot.callLogs)
-                else -> CallBudgetControlsTab(
+                2 -> CallBudgetControlsTab(
                     config = snapshot.config,
-                    onSaveConfig = { viewModel.updateCallGovernanceConfig(it) },
-                    onSimulateIncomingVideo = {
-                        onDismiss()
-                        viewModel.triggerIncomingCallDemo("سارة أحمد", isVideo = true)
+                    onSaveConfig = { viewModel.updateCallGovernanceConfig(it) }
+                )
+                else -> AdminPlatformQueuesTab(
+                    ageSubmissions = ageQueue,
+                    payouts = payoutsQueue,
+                    reports = reportsQueue,
+                    onRefresh = { viewModel.loadAdminQueues() },
+                    onReviewAge = { uid, decision, reason -> viewModel.reviewAgeVerificationAdmin(uid, decision, reason) },
+                    onReviewPayout = { id, decision, note, ref -> viewModel.reviewPayoutAdmin(id, decision, note, ref) },
+                    onAssignRoles = { uid, isAgent, isHost, pct, agencyName ->
+                        viewModel.updateUserRolesAdmin(uid, isAgent, isHost, pct, agencyName)
                     },
-                    onSimulateIncomingAudio = {
-                        onDismiss()
-                        viewModel.triggerIncomingCallDemo("خالد المنصور", isVideo = false)
-                    }
+                    onResolveReport = { id, status, action -> viewModel.resolveReportAdmin(id, status, action) }
                 )
             }
         }
@@ -748,9 +777,7 @@ private fun CallLogItemCard(record: CallRecordEntity) {
 @Composable
 private fun CallBudgetControlsTab(
     config: CallGovernanceConfigEntity,
-    onSaveConfig: (CallGovernanceConfigEntity) -> Unit,
-    onSimulateIncomingVideo: () -> Unit,
-    onSimulateIncomingAudio: () -> Unit
+    onSaveConfig: (CallGovernanceConfigEntity) -> Unit
 ) {
     var budgetText by remember(config.monthlyBudgetAmount) { mutableStateOf(config.monthlyBudgetAmount.toString()) }
     var currencyText by remember(config.currencyCode) { mutableStateOf(config.currencyCode) }
@@ -877,38 +904,6 @@ private fun CallBudgetControlsTab(
                 colors = ButtonDefaults.buttonColors(containerColor = AyerGold)
             ) {
                 Text("حفظ وتطبيق القواعد فوراً", color = Color.Black, fontWeight = FontWeight.Black)
-            }
-        }
-
-        // Quick Owner Verification Triggers for Incoming Calls
-        item {
-            Card(
-                shape = RoundedCornerShape(18.dp),
-                colors = CardDefaults.cardColors(containerColor = HuhTheme.colors.surfaceElevated)
-            ) {
-                Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("اختبار سريع للمكالمات الواردة في المحاكي", color = HuhTheme.colors.textPrimary, fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                        OutlinedButton(
-                            onClick = onSimulateIncomingVideo,
-                            modifier = Modifier.weight(1f),
-                            shape = RoundedCornerShape(12.dp)
-                        ) {
-                            Icon(Icons.Default.Videocam, null, tint = AyerGold, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("مكالمة فيديو واردة", fontSize = 11.sp, color = HuhTheme.colors.textPrimary)
-                        }
-                        OutlinedButton(
-                            onClick = onSimulateIncomingAudio,
-                            modifier = Modifier.weight(1f),
-                            shape = RoundedCornerShape(12.dp)
-                        ) {
-                            Icon(Icons.Default.PhoneCallback, null, tint = AyerCyan, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("مكالمة صوتية واردة", fontSize = 11.sp, color = HuhTheme.colors.textPrimary)
-                        }
-                    }
-                }
             }
         }
     }

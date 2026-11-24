@@ -4,6 +4,9 @@ import path from 'node:path';
 import { AuthoritativeCallEngine, CallEngineError } from './callEngine.js';
 import { LiveKitRoomClient, verifyHs256Jwt } from './livekitJwt.js';
 import { authenticateRequest } from './authMiddleware.js';
+import { createLedgerStore, MemoryLedgerStore } from './ledgerStore.js';
+import { verifyGooglePlayProductPurchase } from './playBillingVerifier.js';
+import { RealtimeBroadcastAndMatchEngine, calculateMatchCost } from './realtimeEngine.js';
 
 function readJsonBody(req, maxBytes = 65_536) {
   return new Promise((resolve, reject) => {
@@ -69,7 +72,10 @@ function persistState(dataFile, engine) {
 export function createCallServer({
   env = process.env,
   engine = null,
-  tokenVerifier = null
+  ledger = null,
+  tokenVerifier = null,
+  playBillingVerifier = null,
+  fetchImpl = globalThis.fetch
 } = {}) {
   const livekitUrl = env.LIVEKIT_URL || '';
   const apiKey = env.LIVEKIT_API_KEY || '';
@@ -86,6 +92,27 @@ export function createCallServer({
     initialState: loadPersistedState(dataFile)
   });
 
+  const realtimeEngine = new RealtimeBroadcastAndMatchEngine({
+    livekitUrl,
+    apiKey,
+    apiSecret,
+    roomCloser: (roomName) => roomClient.deleteRoom(roomName)
+  });
+
+  const ledgerStore = ledger || (env.DATABASE_URL ? null : new MemoryLedgerStore());
+  let resolvedLedger = ledgerStore;
+  let ledgerPromise = ledgerStore ? Promise.resolve(ledgerStore) : null;
+  const getLedger = async () => {
+    if (resolvedLedger) return resolvedLedger;
+    if (!ledgerPromise) {
+      ledgerPromise = createLedgerStore(env).then((store) => {
+        resolvedLedger = store;
+        return store;
+      });
+    }
+    return ledgerPromise;
+  };
+
   const save = () => persistState(dataFile, callEngine);
 
   const server = http.createServer(async (req, res) => {
@@ -95,10 +122,13 @@ export function createCallServer({
       const method = req.method || 'GET';
 
       if (method === 'GET' && pathname === '/health') {
+        const activeLedger = await getLedger();
         return sendJson(res, 200, {
           status: 'ok',
           provider: 'livekit',
-          livekitConfigured: Boolean(livekitUrl && apiKey && apiSecret)
+          livekitConfigured: Boolean(livekitUrl && apiKey && apiSecret),
+          storageMode: activeLedger.mode,
+          playBillingConfigured: Boolean(env.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON || env.GOOGLE_PLAY_ACCESS_TOKEN)
         });
       }
 
@@ -115,6 +145,7 @@ export function createCallServer({
         }
         const eventName = body?.event;
         const roomName = body?.room?.name;
+        const participantIdentity = body?.participant?.identity || null;
         if (roomName) {
           const matchingCall = Array.from(callEngine.calls.values()).find((c) => c.roomName === roomName);
           if (matchingCall && (eventName === 'room_finished' || eventName === 'participant_left')) {
@@ -126,6 +157,7 @@ export function createCallServer({
             });
             save();
           }
+          await realtimeEngine.handleLiveKitWebhook({ eventName, roomName, participantIdentity });
         }
         return sendJson(res, 200, { received: true });
       }
@@ -136,6 +168,322 @@ export function createCallServer({
         return sendJson(res, 401, { error: 'UNAUTHORIZED', message: 'مطلوب تسجيل دخول صالح' });
       }
 
+      const activeLedger = await getLedger();
+
+      // ==========================================================
+      // Auth Sync, Authoritative Wallet & Google Play Billing
+      // ==========================================================
+      if (method === 'POST' && pathname === '/api/auth/sync') {
+        const body = await readJsonBody(req);
+        await activeLedger.ensureUser({
+          uid: user.uid,
+          displayName: body.displayName || user.name || '',
+          email: body.email || user.email || ''
+        });
+        const summary = await activeLedger.getWalletSummary(user.uid, 50);
+        if (user.isAdmin && !summary.user.isAdmin) {
+          summary.user = await activeLedger.adminSetUserRolesAndCommission({
+            reviewerUid: 'system_auth_claims',
+            targetUid: user.uid,
+            isAdmin: true
+          });
+        }
+        return sendJson(res, 200, summary);
+      }
+
+      if (method === 'GET' && pathname === '/api/wallet/summary') {
+        const limit = Number(parsedUrl.searchParams.get('limit') || '50');
+        return sendJson(res, 200, await activeLedger.getWalletSummary(user.uid, limit));
+      }
+
+      if (method === 'POST' && pathname === '/api/wallet/daily-bonus') {
+        const result = await activeLedger.claimDailyBonus({ uid: user.uid });
+        return sendJson(res, 200, result);
+      }
+
+      if (method === 'POST' && pathname === '/api/wallet/spend') {
+        const body = await readJsonBody(req);
+        const result = await activeLedger.spendCoins({
+          uid: user.uid,
+          amount: body.amount,
+          entryType: body.entryType || 'MATCH_SPEND',
+          description: body.description,
+          idempotencyKey: body.idempotencyKey,
+          referenceId: body.referenceId || null,
+          metadata: body.metadata || {}
+        });
+        return sendJson(res, 200, result);
+      }
+
+      if (method === 'POST' && pathname === '/api/wallet/gift') {
+        const body = await readJsonBody(req);
+        const activeStream = body.streamId ? realtimeEngine.getStream(body.streamId) : null;
+        const resolvedRecipient = body.recipientUid || activeStream?.hostUid || '';
+        const result = await activeLedger.sendGiftAtomic({
+          senderUid: user.uid,
+          recipientUid: resolvedRecipient,
+          giftId: body.giftId,
+          giftName: body.giftName,
+          coinsCost: body.coinsCost,
+          idempotencyKey: body.idempotencyKey,
+          streamId: body.streamId || null
+        });
+        if (activeStream && !result.duplicate) {
+          realtimeEngine.recordStreamGift({
+            streamId: activeStream.id,
+            coinsCost: body.coinsCost
+          });
+        }
+        return sendJson(res, 200, result);
+      }
+
+      if (method === 'POST' && pathname === '/api/billing/verify-play-purchase') {
+        const body = await readJsonBody(req);
+        const verified = await verifyGooglePlayProductPurchase({
+          packageName: body.packageName,
+          productId: body.productId,
+          purchaseToken: body.purchaseToken,
+          env,
+          fetchImpl,
+          customVerifier: playBillingVerifier
+        });
+        const credited = await activeLedger.creditPlayPurchase({
+          uid: user.uid,
+          displayName: user.name || '',
+          email: user.email || '',
+          packageId: verified.catalogEntry.packageId,
+          productId: verified.catalogEntry.productId,
+          coinsCredited: verified.catalogEntry.totalCoins,
+          priceUsd: verified.catalogEntry.priceUsd,
+          purchaseToken: body.purchaseToken,
+          orderId: verified.orderId || body.orderId || null,
+          purchaseState: verified.purchaseState ?? 0,
+          acknowledged: verified.acknowledged ?? true,
+          verificationSource: verified.verificationSource || 'google_play_androidpublisher_v3'
+        });
+        return sendJson(res, 200, credited);
+      }
+
+      // ==========================================================
+      // +18 Age Verification Submission
+      // ==========================================================
+      if (method === 'POST' && pathname === '/api/age-verification/submit') {
+        const body = await readJsonBody(req);
+        const sub = await activeLedger.submitAgeVerification({
+          uid: user.uid,
+          displayName: body.displayName || user.name || '',
+          email: body.email || user.email || '',
+          dob: body.dob,
+          ageYears: body.ageYears,
+          acceptedTermsAt: body.acceptedTermsAt,
+          acceptedPrivacyAt: body.acceptedPrivacyAt
+        });
+        return sendJson(res, 201, { submission: sub });
+      }
+
+      // ==========================================================
+      // Agency Dashboard & Bank Payout Requests
+      // ==========================================================
+      if (method === 'GET' && pathname === '/api/agency/dashboard') {
+        return sendJson(res, 200, await activeLedger.getAgencyDashboard(user.uid));
+      }
+
+      if (method === 'POST' && pathname === '/api/agency/sub-agents') {
+        const body = await readJsonBody(req);
+        return sendJson(res, 201, await activeLedger.recruitSubAgent({
+          agentUid: user.uid,
+          subAgentName: body.subAgentName || body.name,
+          country: body.country || '',
+          subAgentUid: body.subAgentUid || null
+        }));
+      }
+
+      if (method === 'POST' && pathname === '/api/payouts/request') {
+        const body = await readJsonBody(req);
+        const created = await activeLedger.createPayoutRequest({
+          uid: user.uid,
+          amountCoins: body.amountCoins,
+          payoutMethod: body.payoutMethod || 'BANK_TRANSFER',
+          bankAccountHolder: body.bankAccountHolder,
+          bankName: body.bankName,
+          ibanOrAccount: body.ibanOrAccount
+        });
+        return sendJson(res, 201, created);
+      }
+
+      if (method === 'GET' && pathname === '/api/payouts') {
+        const status = parsedUrl.searchParams.get('status') || null;
+        const items = await activeLedger.listPayoutRequests({ uid: user.uid, isAdmin: false, status });
+        return sendJson(res, 200, { payouts: items });
+      }
+
+      // ==========================================================
+      // Moderation Reports, User Blocking & Account Deletion
+      // ==========================================================
+      if (method === 'POST' && pathname === '/api/reports') {
+        const body = await readJsonBody(req);
+        const report = await activeLedger.createModerationReport({
+          reportType: body.reportType || 'USER_PROFILE',
+          targetUserId: body.targetUserId || null,
+          streamId: body.streamId || null,
+          reporterUid: user.uid,
+          reason: body.reason,
+          details: body.details || ''
+        });
+        return sendJson(res, 201, { report });
+      }
+
+      if (method === 'GET' && pathname === '/api/blocks') {
+        const blockedUsers = await activeLedger.getBlockedUsers(user.uid);
+        return sendJson(res, 200, { blockedUsers });
+      }
+
+      if (method === 'POST' && pathname === '/api/blocks') {
+        const body = await readJsonBody(req);
+        return sendJson(res, 200, await activeLedger.blockUser({
+          blockerUid: user.uid,
+          blockedUid: body.blockedUid
+        }));
+      }
+
+      const unblockMatch = pathname.match(/^\/api\/blocks\/([^/]+)$/);
+      if (method === 'DELETE' && unblockMatch) {
+        return sendJson(res, 200, await activeLedger.unblockUser({
+          blockerUid: user.uid,
+          blockedUid: decodeURIComponent(unblockMatch[1])
+        }));
+      }
+
+      if (method === 'DELETE' && pathname === '/api/account') {
+        return sendJson(res, 200, await activeLedger.deleteUserAccount({ uid: user.uid }));
+      }
+
+      // ==========================================================
+      // Real Matchmaking Queue & LiveKit Broadcast Rooms
+      // ==========================================================
+      if (method === 'POST' && pathname === '/api/match/join') {
+        const body = await readJsonBody(req);
+        const summary = await activeLedger.getWalletSummary(user.uid, 5);
+        const requiredCost = calculateMatchCost({
+          chatType: body.chatType || 'VIDEO',
+          genderFilter: body.genderFilter || 'ANY',
+          countryFilter: body.countryFilter || 'ANY'
+        });
+        if ((summary.wallet?.pointsBalance || 0) < requiredCost) {
+          throw new CallEngineError('INSUFFICIENT_COINS', `رصيدك غير كافٍ. تحتاج ${requiredCost} نقطة للمطابقة`, 400);
+        }
+        const blockedUids = await activeLedger.getBlockedUsers(user.uid);
+        const matchResult = realtimeEngine.joinMatchQueue({
+          uid: user.uid,
+          displayName: body.displayName || summary.user.displayName || user.name || '',
+          country: body.country || '',
+          countryCode: body.countryCode || 'SA',
+          userGender: body.userGender || 'ANY',
+          age: summary.user.ageYears || 21,
+          bio: body.bio || '',
+          chatType: body.chatType || 'VIDEO',
+          genderFilter: body.genderFilter || 'ANY',
+          countryFilter: body.countryFilter || 'ANY',
+          blockedUids
+        });
+        if (matchResult.status === 'MATCHED' && matchResult.newlyMatched) {
+          const callerDebit = await activeLedger.spendCoins({
+            uid: user.uid,
+            amount: matchResult.costCoins,
+            entryType: 'MATCH_SPEND',
+            description: `مطابقة عشوائية (${matchResult.chatType})`,
+            idempotencyKey: `match_${matchResult.matchId}_${user.uid}`,
+            referenceId: matchResult.matchId
+          });
+          matchResult.wallet = callerDebit.wallet;
+          if (matchResult.partnerUid && matchResult.partnerCostCoins > 0) {
+            await activeLedger.spendCoins({
+              uid: matchResult.partnerUid,
+              amount: matchResult.partnerCostCoins,
+              entryType: 'MATCH_SPEND',
+              description: `مطابقة عشوائية (${matchResult.chatType})`,
+              idempotencyKey: `match_${matchResult.matchId}_${matchResult.partnerUid}`,
+              referenceId: matchResult.matchId
+            }).catch(() => null);
+          }
+        }
+        return sendJson(res, 200, matchResult);
+      }
+
+      if (method === 'GET' && pathname === '/api/match/poll') {
+        const pollRes = realtimeEngine.pollMatchQueue(user.uid);
+        if (pollRes.status === 'MATCHED') {
+          const summary = await activeLedger.getWalletSummary(user.uid, 5);
+          pollRes.wallet = summary.wallet;
+        }
+        return sendJson(res, 200, pollRes);
+      }
+
+      if (method === 'POST' && pathname === '/api/match/leave') {
+        const body = await readJsonBody(req);
+        return sendJson(res, 200, await realtimeEngine.leaveMatchQueueOrSession({
+          uid: user.uid,
+          matchId: body.matchId || null
+        }));
+      }
+
+      if (method === 'GET' && pathname === '/api/streams') {
+        const blockedUids = await activeLedger.getBlockedUsers(user.uid);
+        const category = parsedUrl.searchParams.get('category') || null;
+        return sendJson(res, 200, { streams: realtimeEngine.listLiveStreams({ category, blockedUids }) });
+      }
+
+      if (method === 'POST' && pathname === '/api/streams') {
+        const body = await readJsonBody(req);
+        const summary = await activeLedger.getWalletSummary(user.uid, 5);
+        if (!summary.user.ageVerified && !summary.user.isAdmin) {
+          throw new CallEngineError('AGE_VERIFICATION_REQUIRED', 'يلزم توثيق العمر (+18) قبل بدء البث المباشر', 403);
+        }
+        const created = realtimeEngine.startBroadcast({
+          hostUid: user.uid,
+          hostName: body.hostName || summary.user.displayName || user.name || '',
+          hostCountry: body.hostCountry || '',
+          hostCountryCode: body.hostCountryCode || 'SA',
+          title: body.title || 'بث مباشر على HUH',
+          category: body.category || 'تعارف وسوالف',
+          agencyName: summary.user.agencyName || null,
+          isVip: Boolean(summary.user.isHost || summary.user.isAgent)
+        });
+        return sendJson(res, 201, created);
+      }
+
+      const streamJoinMatch = pathname.match(/^\/api\/streams\/([^/]+)\/join$/);
+      if (method === 'POST' && streamJoinMatch) {
+        const blockedUids = await activeLedger.getBlockedUsers(user.uid);
+        const joined = realtimeEngine.joinBroadcast({
+          streamId: decodeURIComponent(streamJoinMatch[1]),
+          viewerUid: user.uid,
+          viewerName: user.name || '',
+          blockedUids
+        });
+        return sendJson(res, 200, joined);
+      }
+
+      const streamLeaveMatch = pathname.match(/^\/api\/streams\/([^/]+)\/leave$/);
+      if (method === 'POST' && streamLeaveMatch) {
+        return sendJson(res, 200, await realtimeEngine.leaveBroadcast({
+          streamId: decodeURIComponent(streamLeaveMatch[1]),
+          viewerUid: user.uid
+        }));
+      }
+
+      const streamEndMatch = pathname.match(/^\/api\/streams\/([^/]+)\/end$/);
+      if (method === 'POST' && streamEndMatch) {
+        return sendJson(res, 200, await realtimeEngine.endBroadcast({
+          streamId: decodeURIComponent(streamEndMatch[1]),
+          actorUid: user.uid,
+          isAdmin: user.isAdmin
+        }));
+      }
+
+      // ==========================================================
+      // 1-on-1 LiveKit Call Lifecycle
+      // ==========================================================
       if (method === 'POST' && pathname === '/api/calls/initiate') {
         const body = await readJsonBody(req);
         const result = callEngine.initiateCall({
@@ -205,10 +553,100 @@ export function createCallServer({
         return sendJson(res, 200, result);
       }
 
-      // Admin Monitoring & Governance endpoints
-      if (pathname.startsWith('/api/admin/calls')) {
+      // ==========================================================
+      // Admin Governance, Reviews & Monitoring (/api/admin/*)
+      // ==========================================================
+      if (pathname.startsWith('/api/admin/')) {
         if (!user.isAdmin) {
           return sendJson(res, 403, { error: 'FORBIDDEN_ADMIN', message: 'صلاحية الإدارة مطلوبة' });
+        }
+
+        if (method === 'GET' && pathname === '/api/admin/age-verifications') {
+          const status = parsedUrl.searchParams.get('status') || 'PENDING_REVIEW';
+          return sendJson(res, 200, { submissions: await activeLedger.listAgeVerifications(status) });
+        }
+
+        const ageReviewMatch = pathname.match(/^\/api\/admin\/age-verifications\/([^/]+)\/review$/);
+        if (method === 'POST' && ageReviewMatch) {
+          const body = await readJsonBody(req);
+          const result = await activeLedger.reviewAgeVerification({
+            reviewerUid: user.uid,
+            targetUid: decodeURIComponent(ageReviewMatch[1]),
+            decision: body.decision,
+            reason: body.reason || null
+          });
+          return sendJson(res, 200, result);
+        }
+
+        if (method === 'GET' && pathname === '/api/admin/payouts') {
+          const status = parsedUrl.searchParams.get('status') || null;
+          return sendJson(res, 200, {
+            payouts: await activeLedger.listPayoutRequests({ uid: user.uid, isAdmin: true, status })
+          });
+        }
+
+        const payoutReviewMatch = pathname.match(/^\/api\/admin\/payouts\/([^/]+)\/review$/);
+        if (method === 'POST' && payoutReviewMatch) {
+          const body = await readJsonBody(req);
+          const result = await activeLedger.reviewPayoutRequest({
+            reviewerUid: user.uid,
+            requestId: decodeURIComponent(payoutReviewMatch[1]),
+            decision: body.decision,
+            note: body.note || null,
+            paymentReference: body.paymentReference || null
+          });
+          return sendJson(res, 200, result);
+        }
+
+        const roleMatch = pathname.match(/^\/api\/admin\/users\/([^/]+)\/roles$/);
+        if (method === 'POST' && roleMatch) {
+          const body = await readJsonBody(req);
+          const updatedUser = await activeLedger.adminSetUserRolesAndCommission({
+            reviewerUid: user.uid,
+            targetUid: decodeURIComponent(roleMatch[1]),
+            isAgent: body.isAgent,
+            isHost: body.isHost,
+            isAdmin: body.isAdmin,
+            agentCommissionPercent: body.agentCommissionPercent,
+            hostCommissionPercent: body.hostCommissionPercent,
+            agencyName: body.agencyName
+          });
+          return sendJson(res, 200, { user: updatedUser });
+        }
+
+        if (method === 'GET' && pathname === '/api/admin/reports') {
+          const status = parsedUrl.searchParams.get('status') || 'PENDING_REVIEW';
+          return sendJson(res, 200, { reports: await activeLedger.listModerationReports(status) });
+        }
+
+        const repResolveMatch = pathname.match(/^\/api\/admin\/reports\/([^/]+)\/resolve$/);
+        if (method === 'POST' && repResolveMatch) {
+          const body = await readJsonBody(req);
+          const resolved = await activeLedger.resolveModerationReport({
+            reviewerUid: user.uid,
+            reportId: decodeURIComponent(repResolveMatch[1]),
+            status: body.status || 'RESOLVED',
+            actionTaken: body.actionTaken || 'WARNING'
+          });
+          if (resolved.streamId && (body.actionTaken === 'END_STREAM' || body.actionTaken === 'SUSPEND_USER')) {
+            await realtimeEngine.endBroadcast({
+              streamId: resolved.streamId,
+              actorUid: user.uid,
+              isAdmin: true,
+              reason: 'ADMIN_MODERATION'
+            }).catch(() => {});
+          }
+          return sendJson(res, 200, { report: resolved });
+        }
+
+        const adminStreamEndMatch = pathname.match(/^\/api\/admin\/streams\/([^/]+)\/end$/);
+        if (method === 'POST' && adminStreamEndMatch) {
+          return sendJson(res, 200, await realtimeEngine.endBroadcast({
+            streamId: decodeURIComponent(adminStreamEndMatch[1]),
+            actorUid: user.uid,
+            isAdmin: true,
+            reason: 'ADMIN_TERMINATED'
+          }));
         }
 
         if (method === 'GET' && pathname === '/api/admin/calls/monitoring') {
@@ -262,7 +700,7 @@ export function createCallServer({
     }
   });
 
-  return { server, callEngine, persistNow: save };
+  return { server, callEngine, realtimeEngine, getLedger, persistNow: save };
 }
 
 // Start server when executed directly
@@ -272,7 +710,11 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     ...process.env,
     DATA_FILE: process.env.DATA_FILE || './data/calls-store.json'
   };
-  const { server, callEngine, persistNow } = createCallServer({ env: envWithDefaultStore });
+  const { server, callEngine, getLedger, persistNow } = createCallServer({ env: envWithDefaultStore });
+  getLedger()
+    .then((store) => console.log(`[ayer-calls-backend] Authoritative ledger ready (${store.mode})`))
+    .catch((err) => console.error('[ayer-calls-backend] Ledger initialization failed:', err.message));
+
   const sweepTimer = setInterval(async () => {
     try {
       const closed = await callEngine.sweepStaleCalls();
@@ -289,3 +731,4 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     console.log(`[ayer-calls-backend] Listening on port ${port}`);
   });
 }
+

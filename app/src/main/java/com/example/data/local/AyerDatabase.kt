@@ -4,6 +4,8 @@ import android.content.Context
 import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 import com.example.calls.CallAdminAlertEntity
 import com.example.calls.CallGovernanceConfigEntity
 import com.example.calls.CallRecordEntity
@@ -22,7 +24,7 @@ import com.example.data.model.UserProfile
         CallGovernanceConfigEntity::class,
         CallAdminAlertEntity::class
     ],
-    version = 8,
+    version = 9,
     exportSchema = false
 )
 abstract class AyerDatabase : RoomDatabase() {
@@ -36,6 +38,19 @@ abstract class AyerDatabase : RoomDatabase() {
         @Volatile
         private var INSTANCE: AyerDatabase? = null
 
+        val MIGRATION_8_9: Migration = object : Migration(8, 9) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE users ADD COLUMN uid TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE users ADD COLUMN ageVerificationStatus TEXT NOT NULL DEFAULT 'UNVERIFIED'")
+                db.execSQL("ALTER TABLE users ADD COLUMN dob TEXT")
+                db.execSQL("ALTER TABLE users ADD COLUMN acceptedTermsAt INTEGER")
+                db.execSQL("ALTER TABLE users ADD COLUMN acceptedPrivacyAt INTEGER")
+                db.execSQL("ALTER TABLE users ADD COLUMN isAdmin INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE users ADD COLUMN profileVisibility TEXT NOT NULL DEFAULT 'PUBLIC'")
+                db.execSQL("ALTER TABLE users ADD COLUMN directMessagePermission TEXT NOT NULL DEFAULT 'EVERYONE'")
+            }
+        }
+
         fun getDatabase(context: Context): AyerDatabase {
             return INSTANCE ?: synchronized(this) {
                 val instance = Room.databaseBuilder(
@@ -43,8 +58,8 @@ abstract class AyerDatabase : RoomDatabase() {
                     AyerDatabase::class.java,
                     "ayer_database"
                 )
-                .fallbackToDestructiveMigration()
-                .build()
+                    .addMigrations(MIGRATION_8_9)
+                    .build()
                 INSTANCE = instance
                 instance
             }

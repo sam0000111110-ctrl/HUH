@@ -57,10 +57,13 @@ import com.example.ui.theme.AyerSurfaceVariant
 import com.example.ui.theme.HuhTheme
 import java.text.SimpleDateFormat
 import java.util.Date
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.util.SecurityUtils
 import java.util.Locale
 
 @Composable
@@ -70,6 +73,17 @@ fun WalletStoreScreen(
     transactions: List<PointTransaction>,
     modifier: Modifier = Modifier
 ) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    androidx.compose.runtime.DisposableEffect(Unit) {
+        val activity = com.example.util.SecurityUtils.findActivity(context)
+        com.example.util.SecurityUtils.setScreenCaptureProtection(activity, true)
+        onDispose {
+            com.example.util.SecurityUtils.setScreenCaptureProtection(activity, false)
+        }
+    }
+    LaunchedEffect(Unit) {
+        viewModel.initPlayBilling()
+    }
     var showFullHistory by remember { mutableStateOf(false) }
 
     if (showFullHistory) {
@@ -81,6 +95,9 @@ fun WalletStoreScreen(
     }
 
     val packages = viewModel.getCoinPackages()
+    val playPrices by viewModel.playProductPrices.collectAsStateWithLifecycle()
+    val isBillingReady by viewModel.isPlayBillingReady.collectAsStateWithLifecycle()
+    val activity = remember(context) { SecurityUtils.findActivity(context) }
 
     LazyColumn(
         modifier = modifier
@@ -236,18 +253,40 @@ fun WalletStoreScreen(
 
         // Section Title: Coin Packages
         item {
-            Text(
-                text = "باقات شحن النقاط",
-                fontSize = 16.sp,
-                fontWeight = FontWeight.Bold,
-                color = HuhTheme.colors.textPrimary
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "باقات شحن النقاط (Google Play)",
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = HuhTheme.colors.textPrimary
+                )
+                Surface(
+                    color = if (isBillingReady) Color(0xFF00C853).copy(alpha = 0.16f) else Color.Gray.copy(alpha = 0.16f),
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Text(
+                        text = if (isBillingReady) "Google Play متصل ✓" else "بانتظار Google Play",
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = if (isBillingReady) Color(0xFF00E676) else HuhTheme.colors.textSecondary,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                    )
+                }
+            }
             Spacer(modifier = Modifier.height(10.dp))
         }
 
         // List of Coin Packages
         items(packages) { pkg ->
-            CoinPackageRow(pkg = pkg, onPurchase = { viewModel.purchasePackage(pkg) })
+            CoinPackageRow(
+                pkg = pkg,
+                localizedPrice = playPrices[pkg.productId],
+                onPurchase = { viewModel.purchasePackage(pkg, activity) }
+            )
             Spacer(modifier = Modifier.height(8.dp))
         }
 
@@ -322,6 +361,7 @@ fun WalletStoreScreen(
 @Composable
 fun CoinPackageRow(
     pkg: CoinPackage,
+    localizedPrice: String? = null,
     onPurchase: () -> Unit
 ) {
     Card(
@@ -394,7 +434,7 @@ fun CoinPackageRow(
                 shape = RoundedCornerShape(12.dp)
             ) {
                 Text(
-                    text = "$${pkg.priceUsd}",
+                    text = localizedPrice ?: "$${pkg.priceUsd}",
                     fontWeight = FontWeight.Bold,
                     color = if (pkg.isPopular) Color.Black else Color.White
                 )

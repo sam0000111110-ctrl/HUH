@@ -13,6 +13,9 @@ interface UserDao {
     @Query("SELECT * FROM users WHERE id = :id LIMIT 1")
     fun getUserProfile(id: Long = 1L): Flow<UserProfile?>
 
+    @Query("SELECT * FROM users WHERE id = :id LIMIT 1")
+    suspend fun getUserProfileSync(id: Long = 1L): UserProfile?
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertUser(user: UserProfile)
 
@@ -53,4 +56,18 @@ interface UserDao {
         avatarCustomUri: String? = null,
         id: Long = 1L
     )
+
+    @Query("UPDATE users SET ageVerified = :ageVerified, ageVerificationStatus = :status, dob = :dob, age = :age, acceptedTermsAt = :acceptedTermsAt, acceptedPrivacyAt = :acceptedPrivacyAt WHERE id = :id")
+    suspend fun updateAgeVerificationState(
+        ageVerified: Boolean,
+        status: String,
+        dob: String?,
+        age: Int,
+        acceptedTermsAt: Long?,
+        acceptedPrivacyAt: Long?,
+        id: Long = 1L
+    )
+
+    @Query("DELETE FROM users")
+    suspend fun clearAll()
 }

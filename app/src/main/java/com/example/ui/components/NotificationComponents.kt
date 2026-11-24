@@ -293,9 +293,7 @@ fun NotificationCenterDialog(
     onDismiss: () -> Unit,
     onMarkAsRead: (Long) -> Unit,
     onMarkAllAsRead: () -> Unit,
-    onClearAll: () -> Unit,
-    onSimulateReferral: () -> Unit,
-    onSimulateCommissionPayout: () -> Unit
+    onClearAll: () -> Unit
 ) {
     var selectedFilter by remember { mutableStateOf("ALL") } // ALL, COMMISSION, REFERRAL, WITHDRAWAL
 
@@ -376,67 +374,6 @@ fun NotificationCenterDialog(
                             .background(AyerSurfaceElevated, CircleShape)
                     ) {
                         Icon(imageVector = Icons.Default.Close, contentDescription = "إغلاق", tint = Color.White)
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(14.dp))
-
-                // Interactive Simulator Strip (Test referral & commission alerts)
-                Card(
-                    shape = RoundedCornerShape(16.dp),
-                    colors = CardDefaults.cardColors(containerColor = Color(0xFF140B24)),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, AyerPrimary.copy(alpha = 0.5f)),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column(modifier = Modifier.padding(12.dp)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                imageVector = Icons.Default.PlayArrow,
-                                contentDescription = null,
-                                tint = AyerGold,
-                                modifier = Modifier.size(16.dp)
-                            )
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text(
-                                text = "محاكاة الإشعارات المباشرة للمؤثرين:",
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = Color.LightGray
-                            )
-                        }
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            Button(
-                                onClick = onSimulateReferral,
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .height(38.dp)
-                                    .testTag("test_referral_notification_button"),
-                                shape = RoundedCornerShape(10.dp),
-                                colors = ButtonDefaults.buttonColors(containerColor = AyerPrimary)
-                            ) {
-                                Icon(Icons.Default.People, contentDescription = null, modifier = Modifier.size(14.dp))
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text("إحالة جديدة (+250💎)", fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                            }
-
-                            Button(
-                                onClick = onSimulateCommissionPayout,
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .height(38.dp)
-                                    .testTag("test_commission_payout_button"),
-                                shape = RoundedCornerShape(10.dp),
-                                colors = ButtonDefaults.buttonColors(containerColor = AyerGold)
-                            ) {
-                                Icon(Icons.Default.MonetizationOn, contentDescription = null, tint = Color.Black, modifier = Modifier.size(14.dp))
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text("دفعة عمولة (+750💎)", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color.Black)
-                            }
-                        }
                     }
                 }
 

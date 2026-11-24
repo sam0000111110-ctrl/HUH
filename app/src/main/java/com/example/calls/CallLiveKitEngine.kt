@@ -57,6 +57,8 @@ class CallLiveKitEngine(private val appContext: Context) {
         livekitUrl: String,
         token: String,
         enableVideo: Boolean,
+        publishMedia: Boolean = true,
+        endOnRemoteLeave: Boolean = true,
         onReconnecting: () -> Unit,
         onReconnected: () -> Unit,
         onRemoteParticipantLeft: () -> Unit,
@@ -90,8 +92,9 @@ class CallLiveKitEngine(private val appContext: Context) {
                             onDisconnected(event.error?.message)
                         }
                         is RoomEvent.ParticipantDisconnected -> {
-                            // Strictly 1-on-1: close when remote peer leaves so empty room never stays open
-                            onRemoteParticipantLeft()
+                            if (endOnRemoteLeave) {
+                                onRemoteParticipantLeft()
+                            }
                         }
                         is RoomEvent.TrackSubscribed -> {
                             val track = event.track
@@ -116,11 +119,15 @@ class CallLiveKitEngine(private val appContext: Context) {
             createdRoom.connect(url = livekitUrl, token = token)
             _isConnected.value = true
 
-            createdRoom.localParticipant.setMicrophoneEnabled(true)
-            createdRoom.localParticipant.setCameraEnabled(enableVideo)
+            if (publishMedia) {
+                createdRoom.localParticipant.setMicrophoneEnabled(true)
+                createdRoom.localParticipant.setCameraEnabled(enableVideo)
 
-            val localCamPub = createdRoom.localParticipant.getTrackPublication(Track.Source.CAMERA)
-            _localVideoTrack.value = localCamPub?.track as? VideoTrack
+                val localCamPub = createdRoom.localParticipant.getTrackPublication(Track.Source.CAMERA)
+                _localVideoTrack.value = localCamPub?.track as? VideoTrack
+            } else {
+                _localVideoTrack.value = null
+            }
             true
         } catch (t: Throwable) {
             Log.e(TAG, "LiveKit connect failed: ${t.message}", t)
