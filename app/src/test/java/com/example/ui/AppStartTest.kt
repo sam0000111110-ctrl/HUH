@@ -5,8 +5,10 @@ import androidx.test.core.app.ActivityScenario
 import com.example.MainActivity
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.robolectric.annotation.Config
 
 @RunWith(AndroidJUnit4::class)
+@Config(sdk = [34])
 class AppStartTest {
     @Test
     fun testAppLaunch() {
