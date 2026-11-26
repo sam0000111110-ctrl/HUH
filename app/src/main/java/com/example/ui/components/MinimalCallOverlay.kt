@@ -129,13 +129,11 @@ fun MinimalCallOverlay(
     ) {
         // Video View or Audio/Camera-Off Placeholder
         if (callSession.isCameraEnabled && !callSession.isNetworkWeak) {
-            // Main video feed
-            val participantAvatar = callSession.participantAvatarRes ?: R.drawable.img_live_model_1
-            Image(
-                painter = painterResource(id = participantAvatar),
-                contentDescription = callSession.participantName,
-                modifier = Modifier.fillMaxSize(),
-                contentScale = ContentScale.Crop
+            // Main participant placeholder until live remote video track attaches
+            StreamRoomAmbientBackdrop(
+                hostName = callSession.participantName,
+                imageResId = callSession.participantAvatarRes,
+                modifier = Modifier.fillMaxSize()
             )
 
             // Self view preview (Picture in Picture in top-left)
@@ -146,13 +144,14 @@ fun MinimalCallOverlay(
                     .size(width = 100.dp, height = 140.dp)
                     .clip(RoundedCornerShape(16.dp))
                     .border(1.5.dp, Color.White.copy(alpha = 0.6f), RoundedCornerShape(16.dp))
-                    .background(Color(0xFF201A30))
+                    .background(Color(0xFF201A30)),
+                contentAlignment = Alignment.Center
             ) {
-                Image(
-                    painter = painterResource(id = R.drawable.img_live_model_3),
+                Icon(
+                    imageVector = Icons.Default.Videocam,
                     contentDescription = "الكاميرا الخاصة بي",
-                    modifier = Modifier.fillMaxSize(),
-                    contentScale = ContentScale.Crop
+                    tint = AyerGold,
+                    modifier = Modifier.size(30.dp)
                 )
                 Text(
                     text = if (callSession.isFrontCamera) "أمامي" else "خلفي",
@@ -199,15 +198,13 @@ fun MinimalCallOverlay(
                 )
 
                 // Central Avatar
-                val avatarRes = callSession.participantAvatarRes ?: R.drawable.img_live_model_1
-                Image(
-                    painter = painterResource(id = avatarRes),
-                    contentDescription = callSession.participantName,
-                    modifier = Modifier
-                        .size(110.dp)
-                        .clip(CircleShape)
-                        .border(3.dp, AyerGold, CircleShape),
-                    contentScale = ContentScale.Crop
+                UserInitialAvatar(
+                    name = callSession.participantName,
+                    avatarResId = callSession.participantAvatarRes,
+                    size = 110.dp,
+                    borderWidth = 3.dp,
+                    borderColor = AyerGold,
+                    fontSize = 32.sp
                 )
             }
         }

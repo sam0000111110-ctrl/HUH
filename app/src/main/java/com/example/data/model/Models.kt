@@ -200,23 +200,6 @@ data class AppNotification(
     val senderName: String? = null
 )
 
-@Entity(tableName = "secondary_profiles")
-data class SecondaryProfile(
-    @PrimaryKey(autoGenerate = true) val id: Long = 0L,
-    val parentUserId: Long = 1L,
-    val username: String,
-    val passwordHash: String,
-    val displayName: String,
-    val avatarUrl: String? = null,
-    val avatarResId: Int? = null,
-    val bio: String = "بروفايل خاص محمي برمز سري",
-    val notificationsEnabled: Boolean = false,
-    val pointsBalance: Int = 0,
-    val createdAt: Long = System.currentTimeMillis(),
-    val lastAccessedAt: Long = System.currentTimeMillis(),
-    val status: String = "ACTIVE" // ACTIVE, SUSPENDED
-)
-
 enum class CallQualityMode {
     ADAPTIVE_SMART, // LiveKit Simulcast Adaptive Bitrate
     DATA_SAVER,     // توفير بيانات (منخفض 360p)

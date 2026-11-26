@@ -44,7 +44,7 @@ class VoiceAudioHelper(private val context: Context) {
                 setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
                 setAudioSamplingRate(16000)
                 setAudioEncodingBitRate(24000)
-                setMaxDuration(60_000)
+                setMaxDuration(50_000)
                 setOutputFile(outFile.absolutePath)
                 prepare()
                 start()
@@ -73,12 +73,12 @@ class VoiceAudioHelper(private val context: Context) {
             if (file == null || !file.exists() || file.length() == 0L) {
                 return Result.failure(IllegalStateException("لم يتم التقاط مقطع صوتي صالح."))
             }
-            // Limit Firestore inline Base64 payload to ~180 KB (~60s at 24kbps AAC)
-            val base64 = if (file.length() <= 190_000L) {
-                Base64.encodeToString(file.readBytes(), Base64.NO_WRAP)
-            } else {
-                null
+            // Enforce inline payload limit (< 190 KB) so cross-device Firestore delivery never drops audio
+            if (file.length() > 190_000L) {
+                runCatching { file.delete() }
+                return Result.failure(IllegalStateException("المقطع الصوتي طويل جداً؛ الحد الأقصى 50 ثانية."))
             }
+            val base64 = Base64.encodeToString(file.readBytes(), Base64.NO_WRAP)
             Result.success(
                 RecordedVoiceClip(
                     filePath = file.absolutePath,

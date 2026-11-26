@@ -160,6 +160,7 @@ import com.example.R
 import com.example.data.model.PointTransaction
 import com.example.data.model.UserProfile
 import com.example.data.model.currentAgencyLevel
+import com.example.data.remote.FeatureFlagsDto
 import com.example.ui.AyerViewModel
 import com.example.ui.components.AgeVerifiedBadge
 import com.example.ui.components.DailyMissionsCard
@@ -170,6 +171,7 @@ import com.example.ui.locale.AppLanguage
 import com.example.ui.locale.AppStrings
 import com.example.ui.theme.AyerCyan
 import com.example.ui.theme.HuhTheme
+import com.example.util.QrMatrixGenerator
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -385,7 +387,6 @@ fun UserProfileScreen(
     userProfile: UserProfile,
     onNavigateToStore: () -> Unit = {},
     onOpenNotificationCenter: () -> Unit = {},
-    onOpenCreateSecondaryProfileDialog: () -> Unit = {},
     onOpenAgenciesScreen: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
@@ -394,7 +395,7 @@ fun UserProfileScreen(
     val isDarkTheme = isDarkThemePref ?: androidx.compose.foundation.isSystemInDarkTheme()
     val appLanguage by viewModel.appLanguage.collectAsStateWithLifecycle()
     val unreadNotificationCount by viewModel.unreadNotificationCount.collectAsStateWithLifecycle()
-    val activeSecondaryProfile by viewModel.activeSecondaryProfile.collectAsStateWithLifecycle()
+    val featureFlags by viewModel.featureFlags.collectAsStateWithLifecycle()
     val engagementState by viewModel.engagementState.collectAsStateWithLifecycle()
     val dailyMissions by viewModel.dailyMissions.collectAsStateWithLifecycle()
     val isTwoFactorAuthEnabled by viewModel.isTwoFactorAuthEnabled.collectAsStateWithLifecycle()
@@ -464,11 +465,7 @@ fun UserProfileScreen(
     val presetAvatars = remember {
         listOf(
             Pair(R.drawable.img_user_avatar, "الافتراضي"),
-            Pair(R.drawable.ic_ayer_logo, "شعار Ayer"),
-            Pair(R.drawable.img_live_model_1, "مودل 1"),
-            Pair(R.drawable.img_live_model_2, "مودل 2"),
-            Pair(R.drawable.img_live_model_3, "مودل 3"),
-            Pair(R.drawable.stream_hero_bg, "خلفية VIP")
+            Pair(R.drawable.ic_ayer_logo, "شعار Ayer")
         )
     }
 
@@ -484,11 +481,9 @@ fun UserProfileScreen(
 📍 البلد: ${userProfile.country}
 💎 رصيد النقاط: ${userProfile.pointsBalance} نقطة
 🔥 التتابع اليومي: ${engagementState.dailyStreakDays} أيام متواصلة
-🎙️ ساعات البث: ${(userProfile.totalMatchesCount * 0.8 + 18.5).toInt()} ساعة
-🤝 الأصدقاء: ${(userProfile.totalMatchesCount * 3 + 28)} صديق
 🌐 كود الدعوة: AYER-${userProfile.id * 8921 + 1000}
 
-انضم إلى تطبيق Ayer واستمتع بالبث المباشر والمحادثات العشوائية:
+انضم إلى تطبيق Ayer واستمتع بالبث المباشر والمحادثات:
 https://ayer.app/u/${userProfile.id}
 """.trimIndent()
 
@@ -556,7 +551,6 @@ https://ayer.app/u/${userProfile.id}
                     UserIdentityHeaderCard(
                         userProfile = userProfile,
                         userEmail = viewModel.getCurrentUserEmail() ?: "",
-                        activeSecondaryProfileName = activeSecondaryProfile?.displayName,
                         engagementState = engagementState,
                         presenceStatus = userPresenceStatus,
                         onPresenceStatusClick = { showPresenceDialog = true },
@@ -659,6 +653,8 @@ https://ayer.app/u/${userProfile.id}
                 AnimatedEntranceCard(index = 8) {
                     AgencyAffiliationCard(
                         userProfile = userProfile,
+                        agenciesEnabled = featureFlags.agenciesEnabled,
+                        payoutsEnabled = featureFlags.payoutsEnabled,
                         onOpenAgencyDashboard = onOpenAgenciesScreen,
                         onPayoutClick = onOpenAgenciesScreen
                     )
@@ -672,6 +668,7 @@ https://ayer.app/u/${userProfile.id}
                 AnimatedEntranceCard(index = 9) {
                     DailyMissionsCard(
                         missions = dailyMissions,
+                        missionRewardsEnabled = featureFlags.missionRewardsEnabled,
                         onClaimReward = { missionId ->
                             viewModel.claimDailyMissionReward(missionId)
                         }
@@ -721,7 +718,6 @@ https://ayer.app/u/${userProfile.id}
                         onToggleTheme = { viewModel.setDarkMode(!isDarkTheme) },
                         appLanguage = appLanguage,
                         onOpenLanguageSelection = { showLanguageBottomSheet = true },
-                        onCreateSecondaryProfile = onOpenCreateSecondaryProfileDialog,
                         blockedUserIds = blockedUserIds,
                         onUnblockUser = { viewModel.unblockUser(it) },
                         onLogout = { viewModel.logoutUser() },
@@ -1307,7 +1303,6 @@ https://ayer.app/u/${userProfile.id}
 fun UserIdentityHeaderCard(
     userProfile: UserProfile,
     userEmail: String,
-    activeSecondaryProfileName: String?,
     engagementState: com.example.data.model.UserEngagementState,
     presenceStatus: UserPresenceStatus = UserPresenceStatus.ONLINE,
     onPresenceStatusClick: () -> Unit = {},
@@ -1318,6 +1313,7 @@ fun UserIdentityHeaderCard(
     unreadNotificationCount: Int,
     onLeaderboardClick: () -> Unit,
     onCopyUserId: (String) -> Unit = {},
+    showReportButton: Boolean = false,
     onReportUserClick: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
@@ -1360,46 +1356,18 @@ fun UserIdentityHeaderCard(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // Secondary profile pill if active
-                if (!activeSecondaryProfileName.isNullOrBlank()) {
-                    Surface(
-                        shape = RoundedCornerShape(10.dp),
-                        color = HuhTheme.colors.secondary.copy(alpha = 0.15f),
-                        border = BorderStroke(1.dp, HuhTheme.colors.secondary.copy(alpha = 0.4f))
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.SwitchAccount,
-                                contentDescription = null,
-                                tint = HuhTheme.colors.secondary,
-                                modifier = Modifier.size(14.dp)
-                            )
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text(
-                                text = "بروفايل: $activeSecondaryProfileName",
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = HuhTheme.colors.secondary
-                            )
-                        }
-                    }
-                } else {
-                    Surface(
-                        shape = RoundedCornerShape(10.dp),
-                        color = HuhTheme.colors.gold.copy(alpha = 0.15f),
-                        border = BorderStroke(1.dp, HuhTheme.colors.gold.copy(alpha = 0.4f))
-                    ) {
-                        Text(
-                            text = "👑 الحساب الرئيسي",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = HuhTheme.colors.gold,
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
-                        )
-                    }
+                Surface(
+                    shape = RoundedCornerShape(10.dp),
+                    color = HuhTheme.colors.gold.copy(alpha = 0.15f),
+                    border = BorderStroke(1.dp, HuhTheme.colors.gold.copy(alpha = 0.4f))
+                ) {
+                    Text(
+                        text = "👑 الحساب الرئيسي",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = HuhTheme.colors.gold,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                    )
                 }
 
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -1664,33 +1632,35 @@ fun UserIdentityHeaderCard(
                             }
                         }
 
-                        Surface(
-                            shape = RoundedCornerShape(8.dp),
-                            color = Color(0xFFFF2A85).copy(alpha = 0.12f),
-                            border = BorderStroke(0.8.dp, Color(0xFFFF2A85).copy(alpha = 0.35f)),
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(8.dp))
-                                .clickable { onReportUserClick() }
-                                .testTag("btn_report_user")
-                                .testTag("report_user_button")
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        if (showReportButton) {
+                            Surface(
+                                shape = RoundedCornerShape(8.dp),
+                                color = Color(0xFFFF2A85).copy(alpha = 0.12f),
+                                border = BorderStroke(0.8.dp, Color(0xFFFF2A85).copy(alpha = 0.35f)),
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .clickable { onReportUserClick() }
+                                    .testTag("btn_report_user")
+                                    .testTag("report_user_button")
                             ) {
-                                Icon(
-                                    imageVector = Icons.Default.Flag,
-                                    contentDescription = "إبلاغ عن هذا الحساب",
-                                    tint = Color(0xFFFF2A85),
-                                    modifier = Modifier.size(12.dp)
-                                )
-                                Text(
-                                    text = "إبلاغ",
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = Color(0xFFFF2A85)
-                                )
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Flag,
+                                        contentDescription = "إبلاغ عن هذا الحساب",
+                                        tint = Color(0xFFFF2A85),
+                                        modifier = Modifier.size(12.dp)
+                                    )
+                                    Text(
+                                        text = "إبلاغ",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color(0xFFFF2A85)
+                                    )
+                                }
                             }
                         }
                     }
@@ -2866,6 +2836,8 @@ fun UserActivityStatisticsCard(
 @Composable
 fun AgencyAffiliationCard(
     userProfile: UserProfile,
+    agenciesEnabled: Boolean = false,
+    payoutsEnabled: Boolean = false,
     onOpenAgencyDashboard: () -> Unit,
     onPayoutClick: () -> Unit,
     modifier: Modifier = Modifier
@@ -3081,13 +3053,14 @@ fun AgencyAffiliationCard(
 
             Spacer(modifier = Modifier.height(14.dp))
 
-            // Actions: Open Agency Dashboard & Simulate Payout
+            // Actions: Open Agency Dashboard & Payout
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 Button(
                     onClick = onOpenAgencyDashboard,
+                    enabled = agenciesEnabled,
                     shape = RoundedCornerShape(12.dp),
                     colors = ButtonDefaults.buttonColors(containerColor = AyerCyan),
                     modifier = Modifier
@@ -3097,31 +3070,32 @@ fun AgencyAffiliationCard(
                     Icon(
                         imageVector = Icons.Default.Business,
                         contentDescription = null,
-                        tint = Color.Black,
+                        tint = if (agenciesEnabled) Color.Black else HuhTheme.colors.textTertiary,
                         modifier = Modifier.size(16.dp)
                     )
                     Spacer(modifier = Modifier.width(4.dp))
                     Text(
-                        text = "لوحة تحكم الوكالة",
+                        text = if (agenciesEnabled) "لوحة تحكم الوكالة" else "الوكالات متوقفة مؤقتاً",
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Bold,
-                        color = Color.Black
+                        color = if (agenciesEnabled) Color.Black else HuhTheme.colors.textTertiary
                     )
                 }
 
                 OutlinedButton(
                     onClick = onPayoutClick,
+                    enabled = payoutsEnabled,
                     shape = RoundedCornerShape(12.dp),
-                    border = BorderStroke(1.dp, Color(0xFF10B981).copy(alpha = 0.7f)),
+                    border = BorderStroke(1.dp, Color(0xFF10B981).copy(alpha = if (payoutsEnabled) 0.7f else 0.25f)),
                     modifier = Modifier
                         .weight(1f)
                         .testTag("btn_agency_payout_action")
                 ) {
                     Text(
-                        text = "الأرباح والسحب",
+                        text = if (payoutsEnabled) "الأرباح والسحب" else "السحب متوقف",
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Bold,
-                        color = Color(0xFF10B981)
+                        color = if (payoutsEnabled) Color(0xFF10B981) else HuhTheme.colors.textTertiary
                     )
                 }
             }
@@ -3399,7 +3373,6 @@ fun AccountPreferencesCard(
     onToggleTheme: () -> Unit,
     appLanguage: AppLanguage,
     onOpenLanguageSelection: () -> Unit,
-    onCreateSecondaryProfile: () -> Unit,
     blockedUserIds: Set<String> = emptySet(),
     onUnblockUser: (String) -> Unit = {},
     onLogout: () -> Unit,
@@ -3497,49 +3470,6 @@ fun AccountPreferencesCard(
                 currentLanguage = appLanguage,
                 onOpenLanguageDialog = onOpenLanguageSelection
             )
-
-            HorizontalDivider(color = HuhTheme.colors.surfaceVariant)
-
-            // Secondary Profiles Action Row
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(12.dp))
-                    .clickable { onCreateSecondaryProfile() }
-                    .padding(vertical = 12.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        imageVector = Icons.Default.SwitchAccount,
-                        contentDescription = null,
-                        tint = HuhTheme.colors.secondary,
-                        modifier = Modifier.size(20.dp)
-                    )
-                    Spacer(modifier = Modifier.width(10.dp))
-                    Column {
-                        Text(
-                            text = "إدارة البروفايلات الفرعية (Dual Profile)",
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = HuhTheme.colors.textPrimary
-                        )
-                        Text(
-                            text = "فصل الهوية الشخصية عن البث والعمل",
-                            fontSize = 11.sp,
-                            color = HuhTheme.colors.textSecondary
-                        )
-                    }
-                }
-
-                Icon(
-                    imageVector = Icons.AutoMirrored.Filled.ArrowForwardIos,
-                    contentDescription = null,
-                    tint = HuhTheme.colors.textTertiary,
-                    modifier = Modifier.size(14.dp)
-                )
-            }
 
             HorizontalDivider(color = HuhTheme.colors.surfaceVariant)
 
@@ -5131,7 +5061,7 @@ fun UserProfileQrCodeDialog(
                     Box(
                         modifier = Modifier
                             .fillMaxSize()
-                            .padding(16.dp),
+                            .padding(14.dp),
                         contentAlignment = Alignment.Center
                     ) {
                         QrCodeCanvas(
@@ -5140,23 +5070,6 @@ fun UserProfileQrCodeDialog(
                             darkColor = Color(0xFF1E1E2E),
                             lightColor = Color.White
                         )
-
-                        // Central Logo Badge
-                        Surface(
-                            shape = CircleShape,
-                            color = Color(0xFFFF2A85),
-                            border = BorderStroke(2.dp, Color.White),
-                            modifier = Modifier.size(36.dp)
-                        ) {
-                            Box(contentAlignment = Alignment.Center) {
-                                Text(
-                                    text = "AY",
-                                    fontWeight = FontWeight.Black,
-                                    fontSize = 12.sp,
-                                    color = Color.White
-                                )
-                            }
-                        }
                     }
                 }
 
@@ -5224,7 +5137,7 @@ fun UserProfileQrCodeDialog(
 }
 
 /**
- * QR Code Canvas Drawing Composable
+ * Genuine ISO-18004 Scannable QR Code Canvas Drawing Composable backed by ZXing.
  */
 @Composable
 fun QrCodeCanvas(
@@ -5233,71 +5146,21 @@ fun QrCodeCanvas(
     darkColor: Color = Color.Black,
     lightColor: Color = Color.White
 ) {
+    val matrix = remember(content) { QrMatrixGenerator.encode(content) }
     Canvas(modifier = modifier) {
         val sizePx = size.minDimension
-        val moduleCount = 25
-        val moduleSize = sizePx / moduleCount
+        val moduleSize = sizePx / matrix.size.coerceAtLeast(1)
 
-        // Draw light background
         drawRect(color = lightColor, size = Size(sizePx, sizePx))
 
-        // Deterministic hash to populate simulated QR grid
-        val hash = content.hashCode()
-
-        fun isFinderPattern(r: Int, c: Int): Boolean {
-            // Top-left finder (7x7)
-            if (r in 0..6 && c in 0..6) return true
-            // Top-right finder (7x7)
-            if (r in 0..6 && c in (moduleCount - 7) until moduleCount) return true
-            // Bottom-left finder (7x7)
-            if (r in (moduleCount - 7) until moduleCount && c in 0..6) return true
-            // Center logo space (5x5)
-            if (r in 10..14 && c in 10..14) return true
-            return false
-        }
-
-        // Draw standard QR Finder Pattern
-        fun drawFinder(topRow: Int, leftCol: Int) {
-            val startX = leftCol * moduleSize
-            val startY = topRow * moduleSize
-            val finderSize = 7 * moduleSize
-
-            // Outer dark square
-            drawRect(
-                color = darkColor,
-                topLeft = Offset(startX, startY),
-                size = Size(finderSize, finderSize)
-            )
-            // Inner light square
-            drawRect(
-                color = lightColor,
-                topLeft = Offset(startX + moduleSize, startY + moduleSize),
-                size = Size(finderSize - 2 * moduleSize, finderSize - 2 * moduleSize)
-            )
-            // Center dark square
-            drawRect(
-                color = darkColor,
-                topLeft = Offset(startX + 2 * moduleSize, startY + 2 * moduleSize),
-                size = Size(finderSize - 4 * moduleSize, finderSize - 4 * moduleSize)
-            )
-        }
-
-        drawFinder(0, 0)
-        drawFinder(0, moduleCount - 7)
-        drawFinder(moduleCount - 7, 0)
-
-        // Draw data modules
-        for (r in 0 until moduleCount) {
-            for (c in 0 until moduleCount) {
-                if (!isFinderPattern(r, c)) {
-                    val bit = ((hash xor (r * 31 + c * 17)) and 1) == 0
-                    if (bit) {
-                        drawRect(
-                            color = darkColor,
-                            topLeft = Offset(c * moduleSize, r * moduleSize),
-                            size = Size(moduleSize * 0.92f, moduleSize * 0.92f)
-                        )
-                    }
+        for (r in 0 until matrix.size) {
+            for (c in 0 until matrix.size) {
+                if (matrix.get(r, c)) {
+                    drawRect(
+                        color = darkColor,
+                        topLeft = Offset(c * moduleSize, r * moduleSize),
+                        size = Size(moduleSize + 0.5f, moduleSize + 0.5f)
+                    )
                 }
             }
         }

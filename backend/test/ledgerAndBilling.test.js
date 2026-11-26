@@ -4,14 +4,27 @@ import http from 'node:http';
 import { createCallServer } from '../src/server.js';
 import { MemoryLedgerStore } from '../src/ledgerStore.js';
 
-function startTestServer({ nowMsRef = { value: 1_750_000_000_000 } } = {}) {
+function startTestServer({
+  nowMsRef = { value: 1_750_000_000_000 },
+  enableAllFeatures = true,
+  featureFlags = {}
+} = {}) {
   const ledger = new MemoryLedgerStore({ nowProvider: () => nowMsRef.value });
   const env = {
     LIVEKIT_URL: 'wss://livekit.test.invalid',
     LIVEKIT_API_KEY: 'lk_key',
     LIVEKIT_API_SECRET: 'lk_secret_12345678901234567890',
     ANDROID_PACKAGE_NAME: 'com.aistudio.ayer.live',
-    ADMIN_UIDS: 'admin_1'
+    ADMIN_UIDS: 'admin_1',
+    ...(enableAllFeatures
+      ? {
+          PAYOUTS_ENABLED: 'true',
+          MISSION_REWARDS_ENABLED: 'true',
+          PAID_MEDIA_ENABLED: 'true',
+          AGENCIES_ENABLED: 'true'
+        }
+      : {}),
+    ...featureFlags
   };
   const playBillingVerifier = async ({ productId, purchaseToken }) => ({
     orderId: `GPA.${purchaseToken.slice(0, 8)}`,
@@ -270,6 +283,93 @@ test('Moderation reports, user blocks, and account deletion endpoints work safel
     const del = await api(srv.baseUrl, 'DELETE', '/api/account', 'u:reporter_1');
     assert.equal(del.status, 200);
     assert.equal(del.json.deleted, true);
+
+    // Authoritative mission reward (server catalog + daily replay guard) & host application
+    const mOk = await api(srv.baseUrl, 'POST', '/api/wallet/mission-reward', 'u:mission_user', {
+      missionId: 'mission_chat'
+    });
+    assert.equal(mOk.status, 200);
+    assert.equal(mOk.json.creditedCoins, 20);
+    assert.equal(mOk.json.wallet.pointsBalance, 20);
+
+    const mDup = await api(srv.baseUrl, 'POST', '/api/wallet/mission-reward', 'u:mission_user', {
+      missionId: 'mission_chat'
+    });
+    assert.equal(mDup.status, 409);
+
+    const mBad = await api(srv.baseUrl, 'POST', '/api/wallet/mission-reward', 'u:mission_user', {
+      missionId: 'hack_10000'
+    });
+    assert.equal(mBad.status, 400);
+
+    const hostApply = await api(srv.baseUrl, 'POST', '/api/host/apply', 'u:mission_user', {
+      agencyName: 'الوكالة الماسية'
+    });
+    assert.equal(hostApply.status, 200);
+    assert.equal(hostApply.json.user.hostStatus, 'PENDING');
+    assert.equal(hostApply.json.user.agencyName, 'الوكالة الماسية');
+  } finally {
+    await srv.close();
+  }
+});
+
+test('WP-0 Feature Flags default to disabled (fail-closed 503 FEATURE_DISABLED) when not explicitly enabled', async () => {
+  const srv = await startTestServer({ enableAllFeatures: false });
+  try {
+    const flagsRes = await api(srv.baseUrl, 'GET', '/api/config/flags');
+    assert.equal(flagsRes.status, 200);
+    assert.deepEqual(flagsRes.json, {
+      payoutsEnabled: false,
+      missionRewardsEnabled: false,
+      paidMediaEnabled: false,
+      agenciesEnabled: false
+    });
+
+    const syncRes = await api(srv.baseUrl, 'POST', '/api/auth/sync', 'u:flag_user_1', {
+      displayName: 'Flag User',
+      email: 'flag@example.com'
+    });
+    assert.equal(syncRes.status, 200);
+    assert.deepEqual(syncRes.json.featureFlags, flagsRes.json);
+
+    const missionBlocked = await api(srv.baseUrl, 'POST', '/api/wallet/mission-reward', 'u:flag_user_1', {
+      missionId: 'mission_chat'
+    });
+    assert.equal(missionBlocked.status, 503);
+    assert.equal(missionBlocked.json.error, 'FEATURE_DISABLED');
+
+    const payoutBlocked = await api(srv.baseUrl, 'POST', '/api/payouts/request', 'u:flag_user_1', {
+      amountCoins: 500,
+      bankAccountHolder: 'User',
+      bankName: 'Bank',
+      ibanOrAccount: 'SA1234'
+    });
+    assert.equal(payoutBlocked.status, 503);
+    assert.equal(payoutBlocked.json.error, 'FEATURE_DISABLED');
+
+    const adminPayoutBlocked = await api(srv.baseUrl, 'GET', '/api/admin/payouts', 'u:admin_1');
+    assert.equal(adminPayoutBlocked.status, 503);
+    assert.equal(adminPayoutBlocked.json.error, 'FEATURE_DISABLED');
+
+    const agencyBlocked = await api(srv.baseUrl, 'GET', '/api/agency/dashboard', 'u:flag_user_1');
+    assert.equal(agencyBlocked.status, 503);
+    assert.equal(agencyBlocked.json.error, 'FEATURE_DISABLED');
+
+    const hostApplyBlocked = await api(srv.baseUrl, 'POST', '/api/host/apply', 'u:flag_user_1', {
+      agencyName: 'Test'
+    });
+    assert.equal(hostApplyBlocked.status, 503);
+    assert.equal(hostApplyBlocked.json.error, 'FEATURE_DISABLED');
+
+    const paidMediaBlocked = await api(srv.baseUrl, 'POST', '/api/wallet/gift', 'u:flag_user_1', {
+      recipientUid: 'u_other',
+      giftId: 'media_msg_1',
+      giftName: 'Unlock Media',
+      coinsCost: 50,
+      idempotencyKey: 'unlock_media_msg_1'
+    });
+    assert.equal(paidMediaBlocked.status, 503);
+    assert.equal(paidMediaBlocked.json.error, 'FEATURE_DISABLED');
   } finally {
     await srv.close();
   }

@@ -331,51 +331,9 @@ private fun LiveStreamVideoCardContent(
     showDetails: Boolean = true,
     onShareClick: (() -> Unit)? = null
 ) {
-    val infiniteTransition = rememberInfiniteTransition(label = "stream_card_video_motion_${stream.id}")
+    val infiniteTransition = rememberInfiniteTransition(label = "stream_card_dot_${stream.id}")
 
-    // 1. Handheld Camera Micro-Motion (Subtle pan, tilt & breathing zoom)
-    val cameraZoom by infiniteTransition.animateFloat(
-        initialValue = 1.00f,
-        targetValue = 1.05f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(4200, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "camera_zoom"
-    )
-
-    val cameraPanX by infiniteTransition.animateFloat(
-        initialValue = -3f,
-        targetValue = 3f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(5400, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "camera_pan_x"
-    )
-
-    val cameraPanY by infiniteTransition.animateFloat(
-        initialValue = -2f,
-        targetValue = 2.5f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(3800, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "camera_pan_y"
-    )
-
-    // 2. Dynamic Live Stage Lighting Sweep
-    val stageLightPhase by infiniteTransition.animateFloat(
-        initialValue = 0f,
-        targetValue = 360f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(6000, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "stage_light_phase"
-    )
-
-    // 3. Pulsating Live Red Dot
+    // Pulsating Live Red Dot
     val liveDotAlpha by infiniteTransition.animateFloat(
         initialValue = 0.40f,
         targetValue = 1.00f,
@@ -386,36 +344,7 @@ private fun LiveStreamVideoCardContent(
         label = "live_dot_pulse"
     )
 
-    // 4. Simulated Live Vocal Equalizer Bars (Visual indication of live speaking/singing)
-    val eqBar1 by infiniteTransition.animateFloat(
-        initialValue = 0.25f,
-        targetValue = 0.95f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(350, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "eq_bar_1"
-    )
-    val eqBar2 by infiniteTransition.animateFloat(
-        initialValue = 0.85f,
-        targetValue = 0.30f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(420, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "eq_bar_2"
-    )
-    val eqBar3 by infiniteTransition.animateFloat(
-        initialValue = 0.40f,
-        targetValue = 1.00f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(280, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "eq_bar_3"
-    )
-
-    // 5. Interactive Touch/Hold Animation States (Subtle Scaling & Elevation)
+    // Interactive Touch/Hold Animation States (Subtle Scaling & Elevation)
     val interactionSource = remember { MutableInteractionSource() }
     val isPressed by interactionSource.collectIsPressedAsState()
 
@@ -489,41 +418,11 @@ private fun LiveStreamVideoCardContent(
             // ========================================================
             // A. CACHED SILENT LIVE STREAM VIDEO SURFACE
             // ========================================================
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .graphicsLayer {
-                        scaleX = cameraZoom
-                        scaleY = cameraZoom
-                        translationX = cameraPanX
-                        translationY = cameraPanY
-                    }
-            ) {
-                // Background Video Poster / Live Frame
-                Image(
-                    painter = painterResource(id = stream.imageResId ?: R.drawable.stream_hero_bg),
-                    contentDescription = stream.title,
-                    modifier = Modifier.fillMaxSize(),
-                    contentScale = ContentScale.Crop
-                )
-
-                // Dynamic Live Stage Lighting Sweep (Simulates live studio spotlights & camera flares)
-                val lightOffset = (sin(Math.toRadians(stageLightPhase.toDouble())) * 120).toFloat()
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(
-                            Brush.linearGradient(
-                                colors = listOf(
-                                    Color(0x3500E5FF),
-                                    Color.Transparent,
-                                    Color(0x25FF0055),
-                                    Color.Transparent
-                                ),
-                                start = Offset(lightOffset, 0f),
-                                end = Offset(lightOffset + 300f, 600f)
-                            )
-                        )
+            Box(modifier = Modifier.fillMaxSize()) {
+                StreamRoomAmbientBackdrop(
+                    hostName = stream.hostName,
+                    imageResId = stream.imageResId,
+                    modifier = Modifier.fillMaxSize()
                 )
 
                 // Focus Aura Sheen when touched/held
@@ -543,22 +442,6 @@ private fun LiveStreamVideoCardContent(
                             )
                     )
                 }
-
-                // Cinematic Live Scanline & Shimmer Glow
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(
-                            Brush.radialGradient(
-                                colors = listOf(
-                                    Color.Transparent,
-                                    Color.Black.copy(alpha = 0.35f),
-                                    Color.Black.copy(alpha = 0.75f)
-                                ),
-                                radius = 400f
-                            )
-                        )
-                )
             }
 
             // ========================================================
@@ -654,7 +537,7 @@ private fun LiveStreamVideoCardContent(
                     }
                 }
 
-                // Right Badge: Viewers Counter + Live EQ Visualizer
+                // Right Badge: Authoritative Viewers Counter
                 Surface(
                     color = Color.Black.copy(alpha = 0.65f),
                     shape = RoundedCornerShape(6.dp)
@@ -663,44 +546,12 @@ private fun LiveStreamVideoCardContent(
                         modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        // Live Audio Spectrum Visualizer (Active Vocal Indication)
-                        Row(
-                            verticalAlignment = Alignment.Bottom,
-                            horizontalArrangement = Arrangement.spacedBy(1.5.dp),
-                            modifier = Modifier
-                                .height(10.dp)
-                                .padding(end = 4.dp)
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .width(2.dp)
-                                    .height((10 * eqBar1).dp)
-                                    .clip(RoundedCornerShape(1.dp))
-                                    .background(AyerCyan)
-                            )
-                            Box(
-                                modifier = Modifier
-                                    .width(2.dp)
-                                    .height((10 * eqBar2).dp)
-                                    .clip(RoundedCornerShape(1.dp))
-                                    .background(AyerGold)
-                            )
-                            Box(
-                                modifier = Modifier
-                                    .width(2.dp)
-                                    .height((10 * eqBar3).dp)
-                                    .clip(RoundedCornerShape(1.dp))
-                                    .background(Color(0xFF00E676))
-                            )
-                        }
-
-                        // Smooth incremental counter with organic real-time engagement feedback
                         AnimatedViewerCountBadge(
                             baseCount = stream.viewersCount,
                             fontSize = 9.sp,
                             iconSize = 11.dp,
-                            enableLiveFluctuation = true,
-                            showDeltaPopup = true
+                            enableLiveFluctuation = false,
+                            showDeltaPopup = false
                         )
                     }
                 }

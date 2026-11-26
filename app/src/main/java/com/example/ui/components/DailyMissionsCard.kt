@@ -60,6 +60,7 @@ import com.example.ui.theme.HuhTheme
 @Composable
 fun DailyMissionsCard(
     missions: List<DailyMissionItem>,
+    missionRewardsEnabled: Boolean = false,
     onClaimReward: (missionId: String) -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -162,11 +163,30 @@ fun DailyMissionsCard(
 
             Spacer(modifier = Modifier.height(14.dp))
 
+            if (!missionRewardsEnabled) {
+                Surface(
+                    color = AyerGold.copy(alpha = 0.12f),
+                    shape = RoundedCornerShape(10.dp),
+                    border = BorderStroke(1.dp, AyerGold.copy(alpha = 0.35f)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = "استلام مكافآت المهام متوقف مؤقتاً أثناء المراجعة.",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = AyerGold,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                    )
+                }
+                Spacer(modifier = Modifier.height(10.dp))
+            }
+
             // Missions Items List
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 missions.forEach { mission ->
                     MissionItemRow(
                         mission = mission,
+                        missionRewardsEnabled = missionRewardsEnabled,
                         onClaim = { onClaimReward(mission.id) }
                     )
                 }
@@ -212,6 +232,7 @@ fun DailyMissionsCard(
 @Composable
 fun MissionItemRow(
     mission: DailyMissionItem,
+    missionRewardsEnabled: Boolean = false,
     onClaim: () -> Unit
 ) {
     val iconPair = getMissionIcon(mission.iconName)
@@ -302,12 +323,13 @@ fun MissionItemRow(
                 } else if (mission.isCompleted) {
                     Button(
                         onClick = onClaim,
+                        enabled = missionRewardsEnabled,
                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981)),
                         shape = RoundedCornerShape(10.dp),
                         modifier = Modifier.testTag("claim_mission_${mission.id}")
                     ) {
                         Text(
-                            text = "استلام +${mission.rewardPoints} 🎁",
+                            text = if (missionRewardsEnabled) "استلام +${mission.rewardPoints} 🎁" else "متوقف مؤقتاً",
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Black,
                             color = Color.White

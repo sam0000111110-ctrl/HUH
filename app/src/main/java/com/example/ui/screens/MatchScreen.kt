@@ -126,6 +126,8 @@ import com.example.ui.components.ConnectingStatusBeacon
 import com.example.ui.components.ConnectingWaveformFeedback
 import com.example.ui.components.SmoothDropdownMenu
 import com.example.ui.components.SmoothDropdownMenuItem
+import com.example.ui.components.StreamRoomAmbientBackdrop
+import com.example.ui.components.UserInitialAvatar
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.animateFloatAsState
@@ -1102,29 +1104,14 @@ fun PartnerFoundGlobeZoomView(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         // Candidate Avatar with glowing cyan & gold border
-                        Box(
-                            modifier = Modifier
-                                .size(64.dp)
-                                .clip(CircleShape)
-                                .border(
-                                    BorderStroke(
-                                        2.dp,
-                                        Brush.sweepGradient(
-                                            listOf(AyerCyan, AyerGold, AyerCyan)
-                                        )
-                                    ),
-                                    CircleShape
-                                )
-                        ) {
-                            Image(
-                                painter = painterResource(
-                                    id = candidate.imageResId ?: R.drawable.img_live_model_1
-                                ),
-                                contentDescription = candidate.name,
-                                modifier = Modifier.fillMaxSize(),
-                                contentScale = ContentScale.Crop
-                            )
-                        }
+                        UserInitialAvatar(
+                            name = candidate.name,
+                            avatarResId = candidate.imageResId,
+                            size = 64.dp,
+                            borderWidth = 2.dp,
+                            borderColor = AyerCyan,
+                            fontSize = 22.sp
+                        )
 
                         Spacer(modifier = Modifier.width(14.dp))
 
@@ -1839,26 +1826,14 @@ fun ActiveMatchVoiceContent(
                         .background(AyerPrimary, CircleShape)
                 )
 
-                // Main Avatar
-                Box(
-                    modifier = Modifier
-                        .size(120.dp)
-                        .clip(CircleShape)
-                        .border(
-                            BorderStroke(
-                                3.dp,
-                                Brush.sweepGradient(listOf(AyerCyan, AyerGold, AyerCyan))
-                            ),
-                            CircleShape
-                        )
-                ) {
-                    Image(
-                        painter = painterResource(id = candidate.imageResId ?: R.drawable.img_live_model_1),
-                        contentDescription = candidate.name,
-                        modifier = Modifier.fillMaxSize(),
-                        contentScale = ContentScale.Crop
-                    )
-                }
+                UserInitialAvatar(
+                    name = candidate.name,
+                    avatarResId = candidate.imageResId,
+                    size = 120.dp,
+                    borderWidth = 3.dp,
+                    borderColor = AyerCyan,
+                    fontSize = 38.sp
+                )
             }
 
             Spacer(modifier = Modifier.height(14.dp))
@@ -2128,19 +2103,14 @@ fun ActiveMatchTextContent(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(
-                        modifier = Modifier
-                            .size(44.dp)
-                            .clip(CircleShape)
-                            .border(1.5.dp, AyerCyan, CircleShape)
-                    ) {
-                        Image(
-                            painter = painterResource(id = candidate.imageResId ?: R.drawable.img_live_model_1),
-                            contentDescription = candidate.name,
-                            modifier = Modifier.fillMaxSize(),
-                            contentScale = ContentScale.Crop
-                        )
-                    }
+                    UserInitialAvatar(
+                        name = candidate.name,
+                        avatarResId = candidate.imageResId,
+                        size = 44.dp,
+                        borderWidth = 1.5.dp,
+                        borderColor = AyerCyan,
+                        fontSize = 16.sp
+                    )
                     Spacer(modifier = Modifier.width(10.dp))
                     Column {
                         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -2450,22 +2420,6 @@ fun AgencyStreamMotionCard(
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    // 4-second animation cycle simulating selected live stream clip
-    val infiniteTransition = rememberInfiniteTransition(label = "stream_4s_${stream.id}")
-    val progress4s by infiniteTransition.animateFloat(
-        initialValue = 0f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = (stream.previewClipSeconds * 1000).coerceAtLeast(3000), easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "phase"
-    )
-
-    // Subtle video zoom & horizontal pan simulating live camera movement
-    val animatedScale = 1.0f + 0.08f * kotlin.math.sin(progress4s * Math.PI.toFloat())
-    val animatedPanX = 4f * kotlin.math.sin(progress4s * Math.PI.toFloat() * 2f)
-
     Surface(
         modifier = modifier
             .width(135.dp)
@@ -2487,35 +2441,10 @@ fun AgencyStreamMotionCard(
         shadowElevation = 8.dp
     ) {
         Box(modifier = Modifier.fillMaxSize()) {
-            // Background Image with 4-second animated video motion loop
-            Image(
-                painter = painterResource(id = stream.imageResId ?: R.drawable.stream_hero_bg),
-                contentDescription = stream.title,
-                modifier = Modifier
-                    .fillMaxSize()
-                    .graphicsLayer {
-                        scaleX = animatedScale
-                        scaleY = animatedScale
-                        translationX = animatedPanX
-                    },
-                contentScale = ContentScale.Crop
-            )
-
-            // 4-second Shimmer Sweep Line
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(
-                        Brush.horizontalGradient(
-                            colors = listOf(
-                                Color.Transparent,
-                                Color.White.copy(alpha = 0.18f * (1f - kotlin.math.abs(progress4s - 0.5f) * 2)),
-                                Color.Transparent
-                            ),
-                            startX = progress4s * 250f,
-                            endX = progress4s * 250f + 70f
-                        )
-                    )
+            StreamRoomAmbientBackdrop(
+                hostName = stream.hostName,
+                imageResId = stream.imageResId,
+                modifier = Modifier.fillMaxSize()
             )
 
             // Top Badges Row
@@ -2526,7 +2455,6 @@ fun AgencyStreamMotionCard(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // Live & 4s Indicator
                 Surface(
                     shape = RoundedCornerShape(8.dp),
                     color = Color.Red.copy(alpha = 0.88f)
@@ -2541,7 +2469,7 @@ fun AgencyStreamMotionCard(
                                 .background(Color.White, CircleShape)
                         )
                         Spacer(modifier = Modifier.width(3.dp))
-                        Text(text = "4ث", fontSize = 9.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                        Text(text = "بث", fontSize = 9.sp, fontWeight = FontWeight.Bold, color = Color.White)
                     }
                 }
 
@@ -2591,30 +2519,12 @@ fun AgencyStreamMotionCard(
                         color = AyerCyan
                     )
                     Text(
-                        text = "0:0${(progress4s * 4).toInt() + 1}",
+                        text = stream.hostCountry,
                         fontSize = 9.sp,
                         fontWeight = FontWeight.Bold,
-                        color = AyerGold
-                    )
-                }
-
-                Spacer(modifier = Modifier.height(3.dp))
-
-                // 4-Second Dynamic Progress Bar
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(2.5.dp)
-                        .clip(RoundedCornerShape(2.dp))
-                        .background(Color.White.copy(alpha = 0.25f))
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth(fraction = progress4s.coerceIn(0f, 1f))
-                            .height(2.5.dp)
-                            .background(
-                                Brush.horizontalGradient(listOf(AyerCyan, AyerGold))
-                            )
+                        color = AyerGold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
             }

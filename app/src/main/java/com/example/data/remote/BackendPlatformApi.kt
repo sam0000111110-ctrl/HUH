@@ -73,10 +73,20 @@ data class BackendLedgerEntryDto(
 
 @Keep
 @JsonClass(generateAdapter = true)
+data class FeatureFlagsDto(
+    val payoutsEnabled: Boolean = false,
+    val missionRewardsEnabled: Boolean = false,
+    val paidMediaEnabled: Boolean = false,
+    val agenciesEnabled: Boolean = false
+)
+
+@Keep
+@JsonClass(generateAdapter = true)
 data class WalletSummaryResponseDto(
     val user: BackendUserDto,
     val wallet: BackendWalletDto,
-    val transactions: List<BackendLedgerEntryDto> = emptyList()
+    val transactions: List<BackendLedgerEntryDto> = emptyList(),
+    val featureFlags: FeatureFlagsDto = FeatureFlagsDto()
 )
 
 @Keep
@@ -84,6 +94,31 @@ data class WalletSummaryResponseDto(
 data class DailyBonusResponseDto(
     val wallet: BackendWalletDto,
     val creditedCoins: Int = 0
+)
+
+@Keep
+@JsonClass(generateAdapter = true)
+data class MissionRewardRequestDto(
+    val missionId: String
+)
+
+@Keep
+@JsonClass(generateAdapter = true)
+data class MissionRewardResponseDto(
+    val wallet: BackendWalletDto,
+    val creditedCoins: Int = 0
+)
+
+@Keep
+@JsonClass(generateAdapter = true)
+data class ApplyHostRequestDto(
+    val agencyName: String = ""
+)
+
+@Keep
+@JsonClass(generateAdapter = true)
+data class ApplyHostResponseDto(
+    val user: BackendUserDto
 )
 
 @Keep
@@ -438,6 +473,9 @@ data class StreamSessionResponseDto(
 )
 
 interface BackendPlatformApi {
+    @GET("api/config/flags")
+    suspend fun getFeatureFlags(): Response<FeatureFlagsDto>
+
     @POST("api/auth/sync")
     suspend fun syncAuth(
         @Header("Authorization") bearerToken: String,
@@ -454,6 +492,18 @@ interface BackendPlatformApi {
     suspend fun claimDailyBonus(
         @Header("Authorization") bearerToken: String
     ): Response<DailyBonusResponseDto>
+
+    @POST("api/wallet/mission-reward")
+    suspend fun claimMissionReward(
+        @Header("Authorization") bearerToken: String,
+        @Body body: MissionRewardRequestDto
+    ): Response<MissionRewardResponseDto>
+
+    @POST("api/host/apply")
+    suspend fun applyForHost(
+        @Header("Authorization") bearerToken: String,
+        @Body body: ApplyHostRequestDto
+    ): Response<ApplyHostResponseDto>
 
     @POST("api/wallet/spend")
     suspend fun spendCoins(

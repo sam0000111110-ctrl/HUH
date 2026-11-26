@@ -2,9 +2,15 @@ package com.example.fcm
 
 import android.util.Log
 import com.example.data.model.NotificationType
+import com.example.data.remote.FirestoreChatService
 import com.example.util.AyerNotificationManager
+import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 /**
  * Firebase Cloud Messaging (FCM) Service for Ayer.
@@ -15,14 +21,21 @@ import com.google.firebase.messaging.RemoteMessage
  */
 class AyerFirebaseMessagingService : FirebaseMessagingService() {
 
+    private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
     companion object {
         private const val TAG = "AyerFCMService"
     }
 
     override fun onNewToken(token: String) {
         super.onNewToken(token)
-        Log.d(TAG, "Refreshed FCM Device Registration Token: $token")
-        // Here the FCM token is forwarded to the Ayer backend/Firestore user profile document
+        Log.d(TAG, "Refreshed FCM Device Registration Token received")
+        val uid = runCatching { FirebaseAuth.getInstance().currentUser?.uid }.getOrNull()
+        if (!uid.isNullOrBlank() && token.isNotBlank()) {
+            serviceScope.launch {
+                FirestoreChatService(applicationContext).saveFcmToken(uid, token)
+            }
+        }
     }
 
     override fun onMessageReceived(remoteMessage: RemoteMessage) {

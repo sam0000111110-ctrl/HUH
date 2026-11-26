@@ -11,7 +11,6 @@ import com.example.calls.CallGovernanceConfigEntity
 import com.example.calls.CallRecordEntity
 import com.example.data.model.AppNotification
 import com.example.data.model.PointTransaction
-import com.example.data.model.SecondaryProfile
 import com.example.data.model.UserProfile
 
 @Database(
@@ -19,19 +18,17 @@ import com.example.data.model.UserProfile
         UserProfile::class,
         PointTransaction::class,
         AppNotification::class,
-        SecondaryProfile::class,
         CallRecordEntity::class,
         CallGovernanceConfigEntity::class,
         CallAdminAlertEntity::class
     ],
-    version = 9,
+    version = 10,
     exportSchema = false
 )
 abstract class AyerDatabase : RoomDatabase() {
     abstract fun userDao(): UserDao
     abstract fun transactionDao(): TransactionDao
     abstract fun notificationDao(): NotificationDao
-    abstract fun secondaryProfileDao(): SecondaryProfileDao
     abstract fun callDao(): CallDao
 
     companion object {
@@ -51,6 +48,12 @@ abstract class AyerDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_9_10: Migration = object : Migration(9, 10) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("DROP TABLE IF EXISTS secondary_profiles")
+            }
+        }
+
         fun getDatabase(context: Context): AyerDatabase {
             return INSTANCE ?: synchronized(this) {
                 val instance = Room.databaseBuilder(
@@ -58,7 +61,7 @@ abstract class AyerDatabase : RoomDatabase() {
                     AyerDatabase::class.java,
                     "ayer_database"
                 )
-                    .addMigrations(MIGRATION_8_9)
+                    .addMigrations(MIGRATION_8_9, MIGRATION_9_10)
                     .build()
                 INSTANCE = instance
                 instance

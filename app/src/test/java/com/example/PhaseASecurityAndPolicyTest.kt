@@ -6,12 +6,17 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.performTextReplacement
-import com.example.data.model.SecondaryProfile
 import com.example.data.model.UserProfile
+import com.example.data.remote.FeatureFlagsDto
 import com.example.ui.screens.AgeVerificationGateScreen
 import com.example.ui.theme.AyerTheme
 import com.example.util.AgePolicyUtils
+import com.example.util.QrMatrixGenerator
 import com.example.util.SecurityUtils
+import com.google.zxing.BinaryBitmap
+import com.google.zxing.LuminanceSource
+import com.google.zxing.common.HybridBinarizer
+import com.google.zxing.qrcode.QRCodeReader
 import java.util.Calendar
 import java.util.Locale
 import java.util.TimeZone
@@ -78,21 +83,61 @@ class PhaseASecurityAndPolicyTest {
     }
 
     @Test
-    fun `UserProfile and SecondaryProfile default to zero privileges and zero free points`() {
+    fun `UserProfile defaults to zero privileges, zero free points, and unverified age`() {
         val profile = UserProfile()
         assertEquals(0, profile.pointsBalance)
         assertFalse(profile.isAgent)
         assertFalse(profile.isAdmin)
         assertFalse(profile.isHost)
         assertFalse(profile.ageVerified)
+    }
 
-        val secondary = SecondaryProfile(
-            username = "sec_user",
-            passwordHash = "",
-            displayName = "Sec"
-        )
-        assertEquals(0, secondary.pointsBalance)
-        assertEquals("", secondary.passwordHash)
+    @Test
+    fun `FeatureFlagsDto defaults all unhardened financial features to false`() {
+        val flags = FeatureFlagsDto()
+        assertFalse(flags.payoutsEnabled)
+        assertFalse(flags.missionRewardsEnabled)
+        assertFalse(flags.paidMediaEnabled)
+        assertFalse(flags.agenciesEnabled)
+    }
+
+    @Test
+    fun `QrMatrixGenerator produces genuine ISO-18004 QR matrix decodable by ZXing QRCodeReader`() {
+        val targetUri = "https://ayer.app/u/42"
+        val matrix = QrMatrixGenerator.encode(targetUri)
+        assertTrue(matrix.size >= 21)
+
+        val scale = 4
+        val borderModules = 2
+        val totalModules = matrix.size + borderModules * 2
+        val dim = totalModules * scale
+        val luminance = ByteArray(dim * dim) { 0xFF.toByte() }
+        for (r in 0 until matrix.size) {
+            for (c in 0 until matrix.size) {
+                if (matrix.get(r, c)) {
+                    val startY = (r + borderModules) * scale
+                    val startX = (c + borderModules) * scale
+                    for (dy in 0 until scale) {
+                        for (dx in 0 until scale) {
+                            luminance[(startY + dy) * dim + (startX + dx)] = 0x00.toByte()
+                        }
+                    }
+                }
+            }
+        }
+
+        val source = object : LuminanceSource(dim, dim) {
+            override fun getRow(y: Int, row: ByteArray?): ByteArray {
+                val out = if (row != null && row.size >= dim) row else ByteArray(dim)
+                System.arraycopy(luminance, y * dim, out, 0, dim)
+                return out
+            }
+
+            override fun getMatrix(): ByteArray = luminance
+        }
+
+        val decoded = QRCodeReader().decode(BinaryBitmap(HybridBinarizer(source)))
+        assertEquals(targetUri, decoded.text)
     }
 
     @Test

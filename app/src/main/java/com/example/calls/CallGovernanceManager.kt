@@ -38,7 +38,8 @@ class CallGovernanceManager(
     private val authTokenProvider: suspend () -> String? = { null },
     private val wallClockProvider: () -> Long = { System.currentTimeMillis() },
     private val elapsedRealtimeProvider: () -> Long = { SystemClock.elapsedRealtime() },
-    private val onCriticalAdminAlert: (CallAdminAlertEntity) -> Unit = {}
+    private val onCriticalAdminAlert: (CallAdminAlertEntity) -> Unit = {},
+    private val allowLocalPreviewForTests: Boolean = false
 ) {
     private val mutex = Mutex()
     private val rateLimitWindow = ConcurrentHashMap<String, MutableList<Long>>()
@@ -311,9 +312,15 @@ class CallGovernanceManager(
             }
         }
 
-        // 6. Attempt remote broker if CALL_BACKEND_URL is configured
+        // 6. Attempt remote broker (fail-closed in production builds)
         val bearer = authTokenProvider()
-        if (remoteApi != null && !bearer.isNullOrBlank()) {
+        if (remoteApi != null) {
+            if (bearer.isNullOrBlank()) {
+                return@withLock CallInitiationOutcome.Blocked(
+                    code = "AUTH_REQUIRED_FOR_CALL",
+                    reasonArabic = "يرجى تسجيل الدخول بحساب Google لإجراء مكالمة آمنة."
+                )
+            }
             try {
                 val response = remoteApi.initiateCall(
                     bearerToken = "Bearer $bearer",
@@ -326,6 +333,12 @@ class CallGovernanceManager(
                 )
                 if (response.isSuccessful && response.body() != null) {
                     val body = response.body()!!
+                    if (body.livekitUrl.isBlank() || body.token.isBlank()) {
+                        return@withLock CallInitiationOutcome.Blocked(
+                            code = "INVALID_CALL_SESSION",
+                            reasonArabic = "تعذر الحصول على بيانات غرفة الاتصال من الخادم."
+                        )
+                    }
                     val rec = CallRecordEntity(
                         callId = body.call.callId,
                         roomName = body.call.roomName,
@@ -353,6 +366,11 @@ class CallGovernanceManager(
                         code = "BACKEND_POLICY_${response.code()}",
                         reasonArabic = "رفض الخادم إنشاء المكالمة وفق سياسة الميزانية أو الاستخدام."
                     )
+                } else {
+                    return@withLock CallInitiationOutcome.Blocked(
+                        code = "BACKEND_ERROR_${response.code()}",
+                        reasonArabic = "تعذر بدء المكالمة عبر الخادم (${response.code()}). حاول لاحقاً."
+                    )
                 }
             } catch (t: Throwable) {
                 recordProviderIssueLocked("تعذر الاتصال بخادم إدارة المكالمات: ${t.message}", nowMs)
@@ -363,7 +381,14 @@ class CallGovernanceManager(
             }
         }
 
-        // Local authoritative preview mode (when CALL_BACKEND_URL is blank in local/emulator mode)
+        if (!allowLocalPreviewForTests) {
+            return@withLock CallInitiationOutcome.Blocked(
+                code = "CALL_SERVER_NOT_CONFIGURED",
+                reasonArabic = "خادم المكالمات غير متصل حالياً. تعذر بدء المكالمة."
+            )
+        }
+
+        // Isolated local governance unit-test path only (explicitly enabled by tests)
         val callId = "call_${UUID.randomUUID()}"
         val roomName = "ayer_1on1_$callId"
         val record = CallRecordEntity(

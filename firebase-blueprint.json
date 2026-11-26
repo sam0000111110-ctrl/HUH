@@ -15,7 +15,7 @@
         "bio": { "type": "string" },
         "dob": { "type": "string" },
         "ageVerified": { "type": "boolean" },
-        "ageVerificationStatus": { "type": "string", "enum": ["UNVERIFIED", "PENDING_REVIEW", "VERIFIED", "REJECTED_UNDERAGE"] },
+        "ageVerificationStatus": { "type": "string", "enum": ["UNVERIFIED", "PENDING_REVIEW", "APPROVED", "REJECTED"] },
         "acceptedTermsAt": { "type": "string", "format": "date-time" },
         "acceptedPrivacyAt": { "type": "string", "format": "date-time" },
         "profileVisibility": { "type": "string", "enum": ["PUBLIC", "FRIENDS_ONLY", "PRIVATE_HIDDEN"] },
@@ -156,7 +156,7 @@
         "ageYears": { "type": "integer" },
         "acceptedTermsAt": { "type": "string", "format": "date-time" },
         "acceptedPrivacyAt": { "type": "string", "format": "date-time" },
-        "status": { "type": "string", "enum": ["PENDING_REVIEW", "VERIFIED", "REJECTED_UNDERAGE"] },
+        "status": { "type": "string", "enum": ["PENDING_REVIEW", "APPROVED", "REJECTED"] },
         "submittedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["userId", "dob", "ageYears", "acceptedTermsAt", "acceptedPrivacyAt", "status", "submittedAt"]

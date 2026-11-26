@@ -843,10 +843,10 @@ fun LiveRoomViewer(
                     Box(modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)) {
                         AnimatedViewerCountBadge(
                             baseCount = if (isStreaming) stream.viewersCount else 0,
-                            enableLiveFluctuation = isStreaming,
+                            enableLiveFluctuation = false,
                             fontSize = 12.sp,
                             iconSize = 14.dp,
-                            showDeltaPopup = true
+                            showDeltaPopup = false
                         )
                     }
                 }

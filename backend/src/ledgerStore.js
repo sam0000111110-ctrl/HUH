@@ -316,6 +316,74 @@ export class MemoryLedgerStore {
     });
   }
 
+  async claimMissionReward({ uid, missionId }) {
+    const MISSION_REWARD_CATALOG = {
+      mission_stream: 35,
+      mission_chat: 20,
+      mission_matches: 25,
+      mission_gifts: 30,
+      mission_daily_login: 15,
+      daily_milestone: 50
+    };
+    return this._withLock(() => {
+      const cleanId = String(missionId || '').trim();
+      const rewardCoins = MISSION_REWARD_CATALOG[cleanId];
+      if (!rewardCoins) {
+        throw new CallEngineError('INVALID_MISSION', 'معرف المهمة غير صالح', 400);
+      }
+      const { user, wallet } = this._ensureUserSync({ uid });
+      if (user.deletedAt) {
+        throw new CallEngineError('ACCOUNT_DELETED', 'هذا الحساب محذوف', 403);
+      }
+      const nowMs = this.now();
+      const dayKey = new Date(nowMs).toISOString().slice(0, 10);
+      const idempotencyKey = `mission_${uid}_${dayKey}_${cleanId}`;
+      if (this.idempotencyKeys.has(idempotencyKey)) {
+        throw new CallEngineError('MISSION_ALREADY_CLAIMED', 'تم استلام مكافأة هذه المهمة اليوم بالفعل.', 409);
+      }
+
+      wallet.pointsBalance += rewardCoins;
+      wallet.totalAccumulatedPoints += rewardCoins;
+      wallet.updatedAtMs = nowMs;
+
+      const entry = this._appendLedgerSync({
+        uid,
+        entryType: 'MISSION_REWARD',
+        bucket: 'POINTS',
+        delta: rewardCoins,
+        balanceAfter: wallet.pointsBalance,
+        idempotencyKey,
+        referenceId: cleanId,
+        description: `مكافأة مهمة يومية (${cleanId}) (+${rewardCoins} نقطة)`
+      });
+
+      return { wallet: { ...wallet }, entry, creditedCoins: rewardCoins };
+    });
+  }
+
+  async applyForHost({ uid, agencyName = '' }) {
+    return this._withLock(() => {
+      const { user } = this._ensureUserSync({ uid });
+      if (user.deletedAt) {
+        throw new CallEngineError('ACCOUNT_DELETED', 'هذا الحساب محذوف', 403);
+      }
+      if (!user.isHost && user.hostStatus !== 'APPROVED') {
+        user.hostStatus = 'PENDING';
+      }
+      if (String(agencyName || '').trim()) {
+        user.agencyName = String(agencyName).trim();
+      }
+      user.updatedAtMs = this.now();
+      this._auditSync({
+        actorUid: uid,
+        action: 'HOST_APPLICATION_SUBMITTED',
+        targetId: uid,
+        details: { agencyName: user.agencyName }
+      });
+      return { user: { ...user } };
+    });
+  }
+
   async sendGiftAtomic({ senderUid, recipientUid, giftId, giftName, coinsCost, idempotencyKey, streamId = null }) {
     return this._withLock(() => {
       const cost = Number(coinsCost);
@@ -1142,6 +1210,73 @@ export class PostgresLedgerStore {
         [crypto.randomUUID(), uid, DAILY_BONUS_COINS, updatedWallet.pointsBalance, `daily_${uid}_${nowMs}`, `مكافأة الدخول اليومي (+${DAILY_BONUS_COINS} نقطة)`]
       );
       return { wallet: updatedWallet, creditedCoins: DAILY_BONUS_COINS };
+    });
+  }
+
+  async claimMissionReward({ uid, missionId }) {
+    const MISSION_REWARD_CATALOG = {
+      mission_stream: 35,
+      mission_chat: 20,
+      mission_matches: 25,
+      mission_gifts: 30,
+      mission_daily_login: 15,
+      daily_milestone: 50
+    };
+    return this._withTx(async (c) => {
+      const cleanId = String(missionId || '').trim();
+      const rewardCoins = MISSION_REWARD_CATALOG[cleanId];
+      if (!rewardCoins) {
+        throw new CallEngineError('INVALID_MISSION', 'معرف المهمة غير صالح', 400);
+      }
+      const { user } = await this._ensureUserTx(c, { uid });
+      if (user.deletedAt) {
+        throw new CallEngineError('ACCOUNT_DELETED', 'هذا الحساب محذوف', 403);
+      }
+      const nowMs = this.now();
+      const dayKey = new Date(nowMs).toISOString().slice(0, 10);
+      const idempotencyKey = `mission_${uid}_${dayKey}_${cleanId}`;
+      const existing = await c.query(`SELECT * FROM ledger_entries WHERE idempotency_key = $1`, [idempotencyKey]);
+      if (existing.rowCount > 0) {
+        throw new CallEngineError('MISSION_ALREADY_CLAIMED', 'تم استلام مكافأة هذه المهمة اليوم بالفعل.', 409);
+      }
+      const upd = await c.query(
+        `UPDATE wallet_accounts
+         SET points_balance = points_balance + $1,
+             total_accumulated_points = total_accumulated_points + $1,
+             updated_at = NOW()
+         WHERE uid = $2 RETURNING *`,
+        [rewardCoins, uid]
+      );
+      const updatedWallet = this._mapWallet(upd.rows[0]);
+      await c.query(
+        `INSERT INTO ledger_entries (entry_uuid, uid, entry_type, bucket, delta, balance_after, idempotency_key, reference_id, description)
+         VALUES ($1,$2,'MISSION_REWARD','POINTS',$3,$4,$5,$6,$7)`,
+        [crypto.randomUUID(), uid, rewardCoins, updatedWallet.pointsBalance, idempotencyKey, cleanId, `مكافأة مهمة يومية (${cleanId}) (+${rewardCoins} نقطة)`]
+      );
+      return { wallet: updatedWallet, creditedCoins: rewardCoins };
+    });
+  }
+
+  async applyForHost({ uid, agencyName = '' }) {
+    return this._withTx(async (c) => {
+      const { user } = await this._ensureUserTx(c, { uid });
+      if (user.deletedAt) {
+        throw new CallEngineError('ACCOUNT_DELETED', 'هذا الحساب محذوف', 403);
+      }
+      const cleanAgency = String(agencyName || '').trim();
+      const res = await c.query(
+        `UPDATE users
+         SET host_status = CASE WHEN is_host = FALSE AND host_status <> 'APPROVED' THEN 'PENDING' ELSE host_status END,
+             agency_name = CASE WHEN $1 <> '' THEN $1 ELSE agency_name END,
+             updated_at = NOW()
+         WHERE uid = $2 RETURNING *`,
+        [cleanAgency, uid]
+      );
+      await c.query(
+        `INSERT INTO audit_logs (actor_uid, action, target_id, details) VALUES ($1,'HOST_APPLICATION_SUBMITTED',$2,$3)`,
+        [uid, uid, JSON.stringify({ agencyName: cleanAgency })]
+      );
+      return { user: this._mapUser(res.rows[0]) };
     });
   }
 

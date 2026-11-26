@@ -3,7 +3,6 @@ package com.example.data.repository
 import android.content.Context
 import com.example.BuildConfig
 import com.example.data.local.NotificationDao
-import com.example.data.local.SecondaryProfileDao
 import com.example.data.local.TransactionDao
 import com.example.data.local.UserDao
 import com.example.data.model.AgeVerificationSubmissionDoc
@@ -20,13 +19,13 @@ import com.example.data.model.LiveStreamReport
 import com.example.data.model.LiveStreamRoom
 import com.example.data.model.NotificationType
 import com.example.data.model.PointTransaction
-import com.example.data.model.SecondaryProfile
 import com.example.data.model.SubAgentItem
 import com.example.data.model.UserEngagementState
 import com.example.data.model.UserProfile
 import com.example.data.model.UserProfileReport
 import com.example.data.remote.AdminAgeVerificationItemDto
 import com.example.data.remote.AdminUpdateRolesRequestDto
+import com.example.data.remote.ApplyHostRequestDto
 import com.example.data.remote.AuthSyncRequestDto
 import com.example.data.remote.BackendLedgerEntryDto
 import com.example.data.remote.BackendPlatformApi
@@ -35,11 +34,13 @@ import com.example.data.remote.BackendWalletDto
 import com.example.data.remote.BlockUserRequestDto
 import com.example.data.remote.CreatePayoutRequestDto
 import com.example.data.remote.CreateReportRequestDto
+import com.example.data.remote.FeatureFlagsDto
 import com.example.data.remote.FirestoreChatService
 import com.example.data.remote.JoinMatchRequestDto
 import com.example.data.remote.LeaveMatchRequestDto
 import com.example.data.remote.LiveStreamDto
 import com.example.data.remote.MatchJoinPollResponseDto
+import com.example.data.remote.MissionRewardRequestDto
 import com.example.data.remote.ModerationReportDto
 import com.example.data.remote.PayoutRequestDto
 import com.example.data.remote.RecruitSubAgentRequestDto
@@ -55,7 +56,9 @@ import com.example.data.remote.VerifyPlayPurchaseRequestDto
 import com.example.util.AgePolicyUtils
 import com.example.util.SecurityUtils
 import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.auth.FirebaseAuthRecentLoginRequiredException
 import com.google.firebase.auth.FirebaseUser
+import com.google.firebase.messaging.FirebaseMessaging
 import java.util.UUID
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -68,7 +71,6 @@ class AyerRepository(
     private val userDao: UserDao,
     private val transactionDao: TransactionDao,
     private val notificationDao: NotificationDao,
-    private val secondaryProfileDao: SecondaryProfileDao,
     private val platformApi: BackendPlatformApi? = buildOptionalPlatformApi()
 ) {
     companion object {
@@ -98,6 +100,22 @@ class AyerRepository(
 
     private val _engagementState = MutableStateFlow(UserEngagementState())
     val engagementState = _engagementState.asStateFlow()
+
+    private val _featureFlags = MutableStateFlow(FeatureFlagsDto())
+    val featureFlags = _featureFlags.asStateFlow()
+
+    suspend fun refreshFeatureFlags(): FeatureFlagsDto {
+        val api = platformApi ?: return _featureFlags.value
+        val res = runCatching { api.getFeatureFlags() }.getOrNull()
+        if (res != null && res.isSuccessful && res.body() != null) {
+            _featureFlags.value = res.body()!!
+        }
+        return _featureFlags.value
+    }
+
+    internal fun setFeatureFlagsForTesting(flags: FeatureFlagsDto) {
+        _featureFlags.value = flags
+    }
 
     private val _dailyMissions = MutableStateFlow(
         listOf(
@@ -297,12 +315,19 @@ class AyerRepository(
                 )
                 if (res.isSuccessful && res.body() != null) {
                     val body = res.body()!!
+                    _featureFlags.value = body.featureFlags
                     applyAuthoritativeSummary(body.user, body.wallet, body.transactions)
                 }
                 val blocksRes = api.getBlocks(bearer)
                 if (blocksRes.isSuccessful && blocksRes.body() != null) {
                     _blockedUserIds.value = blocksRes.body()!!.blockedUsers.toSet()
                 }
+            }
+        }
+        runCatching {
+            val fcmToken = FirebaseMessaging.getInstance().token.await()
+            if (!fcmToken.isNullOrBlank()) {
+                firestoreChatService.saveFcmToken(firebaseUser.uid, fcmToken)
             }
         }
         _dailyMissions.value = _dailyMissions.value.map { mission ->
@@ -422,7 +447,6 @@ class AyerRepository(
         userDao.clearAll()
         transactionDao.clearAll()
         notificationDao.clearAll()
-        secondaryProfileDao.clearAll()
         _engagementState.value = UserEngagementState()
     }
 
@@ -480,96 +504,66 @@ class AyerRepository(
     suspend fun recordMatchEngagement() {
         val current = _engagementState.value
         val newMatches = current.todayMatchesCount + 1
-        val bonus = if (newMatches == current.targetMatchesCount) 20 else 0
         _engagementState.value = current.copy(
             todayMatchesCount = newMatches,
-            todayEngagementPoints = current.todayEngagementPoints + bonus + 5
+            todayEngagementPoints = current.todayEngagementPoints + 5
         )
         _dailyMissions.value = _dailyMissions.value.map { mission ->
             if (mission.id == "mission_matches") {
                 mission.copy(currentProgress = newMatches.coerceAtMost(mission.targetProgress))
             } else mission
         }
-        if (bonus > 0) {
-            userDao.adjustPoints(bonus)
-            transactionDao.insertTransaction(
-                PointTransaction(
-                    type = "ENGAGEMENT_REWARD",
-                    amount = bonus,
-                    description = "مكافأة إنجاز مهمة المطابقات اليومية (+${bonus} نقطة)"
-                )
-            )
-        }
     }
 
     suspend fun recordStreamWatchEngagement(minutes: Int = 5) {
         val current = _engagementState.value
         val newMins = current.todayStreamMinutes + minutes
-        val bonus = if (newMins >= current.targetStreamMinutes && current.todayStreamMinutes < current.targetStreamMinutes) 30 else 0
         _engagementState.value = current.copy(
             todayStreamMinutes = newMins,
-            todayEngagementPoints = current.todayEngagementPoints + bonus + 10
+            todayEngagementPoints = current.todayEngagementPoints + 10
         )
         _dailyMissions.value = _dailyMissions.value.map { mission ->
             if (mission.id == "mission_stream") {
                 mission.copy(currentProgress = newMins.coerceAtMost(mission.targetProgress))
             } else mission
         }
-        if (bonus > 0) {
-            userDao.adjustPoints(bonus)
-            transactionDao.insertTransaction(
-                PointTransaction(
-                    type = "ENGAGEMENT_REWARD",
-                    amount = bonus,
-                    description = "مكافأة إنجاز مشاهدة البثوث اليومية (+${bonus} نقطة)"
-                )
-            )
-        }
     }
 
     suspend fun recordGiftEngagement() {
         val current = _engagementState.value
         val newGifts = current.todayGiftsSent + 1
-        val bonus = if (newGifts == current.targetGiftsSent) 25 else 0
         _engagementState.value = current.copy(
             todayGiftsSent = newGifts,
-            todayEngagementPoints = current.todayEngagementPoints + bonus + 15
+            todayEngagementPoints = current.todayEngagementPoints + 15
         )
         _dailyMissions.value = _dailyMissions.value.map { mission ->
             if (mission.id == "mission_gifts") {
                 mission.copy(currentProgress = newGifts.coerceAtMost(mission.targetProgress))
             } else mission
         }
-        if (bonus > 0) {
-            userDao.adjustPoints(bonus)
-            transactionDao.insertTransaction(
-                PointTransaction(
-                    type = "ENGAGEMENT_REWARD",
-                    amount = bonus,
-                    description = "مكافأة إنجاز تفاعل إرسال الهدايا (+${bonus} نقطة)"
-                )
-            )
-        }
     }
 
     suspend fun claimDailyMissionReward(missionId: String): Boolean {
+        if (!_featureFlags.value.missionRewardsEnabled) return false
         val currentMissions = _dailyMissions.value
         val target = currentMissions.find { it.id == missionId } ?: return false
-        if (target.isCompleted && !target.isClaimed) {
-            userDao.adjustPoints(target.rewardPoints)
-            transactionDao.insertTransaction(
-                PointTransaction(
-                    type = "MISSION_REWARD",
-                    amount = target.rewardPoints,
-                    description = "مكافأة إتمام مهمة: ${target.title} (+${target.rewardPoints} نقطة)"
-                )
-            )
+        if (!target.isCompleted || target.isClaimed) return false
+
+        val api = platformApi ?: return false
+        val bearer = getBearerHeader() ?: return false
+        val res = runCatching {
+            api.claimMissionReward(bearer, MissionRewardRequestDto(missionId = missionId))
+        }.getOrNull() ?: return false
+
+        if (res.isSuccessful && res.body() != null) {
+            applyAuthoritativeSummary(wallet = res.body()!!.wallet)
+            refreshWalletFromBackend()
             _dailyMissions.value = currentMissions.map {
                 if (it.id == missionId) it.copy(isClaimed = true) else it
             }
             val currentEng = _engagementState.value
             _engagementState.value = currentEng.copy(
-                todayEngagementPoints = currentEng.todayEngagementPoints + target.rewardPoints
+                todayEngagementPoints = currentEng.todayEngagementPoints + res.body()!!.creditedCoins
             )
             return true
         }
@@ -577,17 +571,19 @@ class AyerRepository(
     }
 
     suspend fun claimDailyMilestoneReward(): Boolean {
+        if (!_featureFlags.value.missionRewardsEnabled) return false
         val current = _engagementState.value
-        if (!current.dailyMilestoneClaimed && current.todayEngagementPoints >= 100) {
-            val reward = 50
-            userDao.adjustPoints(reward)
-            transactionDao.insertTransaction(
-                PointTransaction(
-                    type = "ENGAGEMENT_REWARD",
-                    amount = reward,
-                    description = "مكافأة تفوق التفاعل اليومي الكامل (+50 نقطة)"
-                )
-            )
+        if (current.dailyMilestoneClaimed || current.todayEngagementPoints < 100) return false
+
+        val api = platformApi ?: return false
+        val bearer = getBearerHeader() ?: return false
+        val res = runCatching {
+            api.claimMissionReward(bearer, MissionRewardRequestDto(missionId = "daily_milestone"))
+        }.getOrNull() ?: return false
+
+        if (res.isSuccessful && res.body() != null) {
+            applyAuthoritativeSummary(wallet = res.body()!!.wallet)
+            refreshWalletFromBackend()
             _engagementState.value = current.copy(dailyMilestoneClaimed = true)
             return true
         }
@@ -649,68 +645,6 @@ class AyerRepository(
         }
     }
 
-    fun getSecondaryProfiles(parentUserId: Long = 1L): Flow<List<SecondaryProfile>> =
-        secondaryProfileDao.getProfilesForParent(parentUserId)
-
-    suspend fun createSecondaryProfile(
-        username: String,
-        password: String,
-        displayName: String,
-        bio: String = "بروفايل خاص محمي برمز سري",
-        notificationsEnabled: Boolean = false,
-        avatarResId: Int? = null,
-        parentUserId: Long = 1L
-    ): Result<SecondaryProfile> {
-        val cleanUsername = username.trim().lowercase()
-        if (cleanUsername.length < 3) {
-            return Result.failure(Exception("اسم المستخدم يجب أن يتكون من 3 أحرف على الأقل"))
-        }
-        if (password.length < 4) {
-            return Result.failure(Exception("كلمة المرور السرية يجب ألا تقل عن 4 خانات"))
-        }
-        val existing = secondaryProfileDao.findByUsername(cleanUsername)
-        if (existing != null) {
-            return Result.failure(Exception("اسم المستخدم مستخدم بالفعل، يرجى اختيار اسم آخر"))
-        }
-
-        val parentUser = userDao.getUserProfile().firstOrNull() ?: UserProfile()
-        val hashedSecret = SecurityUtils.hashSecret(password)
-
-        val profile = SecondaryProfile(
-            parentUserId = parentUserId,
-            username = cleanUsername,
-            passwordHash = hashedSecret,
-            displayName = displayName.ifBlank { "ملف شخصي خاص" },
-            bio = bio,
-            notificationsEnabled = notificationsEnabled,
-            avatarResId = avatarResId ?: com.example.R.drawable.img_live_model_3,
-            pointsBalance = parentUser.pointsBalance
-        )
-        val id = secondaryProfileDao.insertProfile(profile)
-        return Result.success(profile.copy(id = id))
-    }
-
-    suspend fun unlockSecondaryProfileByPassword(passwordAttempt: String, parentUserId: Long = 1L): SecondaryProfile? {
-        val cleanPassword = passwordAttempt.trim()
-        if (cleanPassword.isBlank()) return null
-        val profiles = secondaryProfileDao.getAllProfilesForParentSync(parentUserId)
-        val matched = profiles.firstOrNull { profile ->
-            SecurityUtils.verifySecret(cleanPassword, profile.passwordHash)
-        }
-        if (matched != null) {
-            secondaryProfileDao.updateLastAccessed(matched.id, System.currentTimeMillis())
-        }
-        return matched
-    }
-
-    suspend fun updateSecondaryProfileNotification(id: Long, enabled: Boolean) {
-        secondaryProfileDao.updateNotificationSetting(id, enabled)
-    }
-
-    suspend fun deleteSecondaryProfile(id: Long) {
-        secondaryProfileDao.deleteProfile(id)
-    }
-
     suspend fun refreshWalletFromBackend(): Result<Unit> {
         val api = platformApi ?: return Result.failure(IllegalStateException("الخادم المالي غير مهيأ"))
         val bearer = getBearerHeader() ?: return Result.failure(IllegalStateException("مطلوب تسجيل دخول صالح"))
@@ -718,6 +652,7 @@ class AyerRepository(
             val res = api.getWalletSummary(bearer)
             if (res.isSuccessful && res.body() != null) {
                 val body = res.body()!!
+                _featureFlags.value = body.featureFlags
                 applyAuthoritativeSummary(body.user, body.wallet, body.transactions)
                 Result.success(Unit)
             } else {
@@ -861,11 +796,65 @@ class AyerRepository(
         )
     }
 
-    suspend fun applyForHost(agencyName: String) {
-        userDao.updateHostStatus("PENDING", isHost = false)
+    suspend fun applyForHost(agencyName: String): Result<Unit> {
+        if (!_featureFlags.value.agenciesEnabled) {
+            return Result.failure(IllegalStateException("ميزة الوكالات وطلبات المضيفين متوقفة مؤقتاً أثناء المراجعة."))
+        }
+        val api = platformApi ?: return Result.failure(IllegalStateException("يتطلب التقديم كمضيف اتصالاً بالخادم الرسمي."))
+        val bearer = getBearerHeader() ?: return Result.failure(IllegalStateException("مطلوب تسجيل الدخول أولاً."))
+        return try {
+            val res = api.applyForHost(bearer, ApplyHostRequestDto(agencyName = agencyName.trim()))
+            if (res.isSuccessful && res.body() != null) {
+                userDao.updateHostStatus("PENDING", isHost = false)
+                refreshWalletFromBackend()
+                Result.success(Unit)
+            } else {
+                Result.failure(IllegalStateException(BackendPlatformApi.extractErrorMessage(res, "تعذر إرسال طلب الانضمام كمضيف")))
+            }
+        } catch (t: Throwable) {
+            Result.failure(t)
+        }
+    }
+
+    suspend fun unlockPaidMedia(friendId: String, messageId: String, priceCoins: Int): Result<Unit> {
+        if (!_featureFlags.value.paidMediaEnabled) {
+            return Result.failure(IllegalStateException("ميزة فتح المحتوى المدفوع متوقفة مؤقتاً أثناء المراجعة."))
+        }
+        val api = platformApi ?: return Result.failure(IllegalStateException("يتطلب فتح المحتوى المدفوع الاتصال بالخادم المالي."))
+        val bearer = getBearerHeader() ?: return Result.failure(IllegalStateException("مطلوب تسجيل الدخول أولاً."))
+        val myUid = FirebaseAuth.getInstance().currentUser?.uid ?: userDao.getUserProfileSync()?.uid.orEmpty()
+        return try {
+            val res = api.sendGift(
+                bearer,
+                SendGiftRequestDto(
+                    recipientUid = friendId,
+                    giftId = "media_$messageId",
+                    giftName = "فتح محتوى خاص 🔓",
+                    coinsCost = priceCoins,
+                    idempotencyKey = "unlock_${messageId}_${myUid}",
+                    streamId = messageId
+                )
+            )
+            if (res.isSuccessful && res.body() != null) {
+                refreshWalletFromBackend()
+                val unlockRes = firestoreChatService.markPrivateMediaUnlocked(friendId, messageId)
+                if (unlockRes.isFailure) {
+                    Result.failure(unlockRes.exceptionOrNull() ?: IllegalStateException("تم الدفع لكن تعذر تحديث حالة الرسالة في Firestore"))
+                } else {
+                    Result.success(Unit)
+                }
+            } else {
+                Result.failure(IllegalStateException(BackendPlatformApi.extractErrorMessage(res, "تعذر إتمام عملية الدفع لفتح المحتوى.")))
+            }
+        } catch (t: Throwable) {
+            Result.failure(t)
+        }
     }
 
     suspend fun refreshAgencyDashboard(): Result<Unit> {
+        if (!_featureFlags.value.agenciesEnabled) {
+            return Result.failure(IllegalStateException("لوحة الوكالات متوقفة مؤقتاً أثناء المراجعة."))
+        }
         val api = platformApi ?: return Result.failure(IllegalStateException("خادم الوكالات غير متصل"))
         val bearer = getBearerHeader() ?: return Result.failure(IllegalStateException("مطلوب تسجيل الدخول"))
         return try {
@@ -895,6 +884,9 @@ class AyerRepository(
     }
 
     suspend fun recruitSubAgentResult(name: String, country: String): Result<AppNotification> {
+        if (!_featureFlags.value.agenciesEnabled) {
+            return Result.failure(IllegalStateException("ميزة تسجيل الوكلاء الفرعيين متوقفة مؤقتاً أثناء المراجعة."))
+        }
         val api = platformApi ?: return Result.failure(IllegalStateException("خادم الوكالات غير متصل"))
         val bearer = getBearerHeader() ?: return Result.failure(IllegalStateException("مطلوب تسجيل الدخول"))
         return try {
@@ -927,6 +919,9 @@ class AyerRepository(
         bankName: String,
         ibanOrAccount: String
     ): Result<PayoutRequestDto> {
+        if (!_featureFlags.value.payoutsEnabled) {
+            return Result.failure(IllegalStateException("طلبات السحب المالي متوقفة مؤقتاً أثناء المراجعة."))
+        }
         val api = platformApi ?: return Result.failure(IllegalStateException("خدمة سحب الأرباح تتطلب الاتصال بالخادم المالي"))
         val bearer = getBearerHeader() ?: return Result.failure(IllegalStateException("مطلوب تسجيل الدخول"))
         return try {
@@ -1098,6 +1093,21 @@ class AyerRepository(
             val res = runCatching { api.deleteAccount(bearer) }.getOrNull()
             if (res?.isSuccessful != true) {
                 return Result.failure(IllegalStateException(res?.let { BackendPlatformApi.extractErrorMessage(it, "تعذر حذف الحساب من الخادم") } ?: "تعذر الاتصال بالخادم"))
+            }
+        }
+        val currentUser = runCatching { FirebaseAuth.getInstance().currentUser }.getOrNull()
+        if (currentUser != null) {
+            firestoreChatService.deleteCurrentUserAccountData(currentUser.uid)
+            try {
+                currentUser.delete().await()
+            } catch (_: FirebaseAuthRecentLoginRequiredException) {
+                return Result.failure(
+                    IllegalStateException("تتطلب سياسة الأمان إعادة تسجيل الدخول قبل حذف حساب المصادقة نهائياً.")
+                )
+            } catch (e: Exception) {
+                return Result.failure(
+                    IllegalStateException(e.localizedMessage ?: "تعذر حذف حساب المصادقة في Firebase.")
+                )
             }
         }
         clearLocalSessionData()

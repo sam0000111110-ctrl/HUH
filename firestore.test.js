@@ -139,7 +139,7 @@ test("Cross-user isolation on private_settings, blocks, and age_verifications", 
       ageYears: 28,
       acceptedTermsAt: now,
       acceptedPrivacyAt: now,
-      status: "VERIFIED",
+      status: "APPROVED",
       submittedAt: now,
     })
   );
@@ -160,7 +160,7 @@ test("Cross-user isolation on private_settings, blocks, and age_verifications", 
   );
   await assertSucceeds(
     adminDb.collection("age_verifications").doc(ALICE_UID).update({
-      status: "VERIFIED",
+      status: "APPROVED",
       reviewedBy: ADMIN_UID,
     })
   );
@@ -245,3 +245,88 @@ test("Moderation reports enforce reporter identity and admin-only resolution", a
     adminDb.collection("reports").doc("rep_1").update({ status: "ACTION_TAKEN" })
   );
 });
+
+test("Private chat media fields are immutable and only recipientId can unlock media", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+  const msgRef = (db) => db.collection("private_chats").doc("alice_123_bob_456").collection("messages").doc("paid_1");
+
+  await assertSucceeds(
+    msgRef(aliceDb).set({
+      senderId: ALICE_UID,
+      recipientId: BOB_UID,
+      participantIds: [ALICE_UID, BOB_UID],
+      mediaUri: "data:image/jpeg;base64,abc",
+      mediaPriceCoins: 50,
+      isUnlocked: false,
+      unlockProgress: 0.0,
+      timestamp: Date.now(),
+    })
+  );
+
+  // Tampering with mediaPriceCoins or mediaUri must fail
+  await assertFails(msgRef(bobDb).update({ mediaPriceCoins: 0 }));
+  await assertFails(msgRef(aliceDb).update({ mediaUri: "https://evil.invalid/x.jpg" }));
+
+  // Sender cannot self-unlock on behalf of recipient
+  await assertFails(msgRef(aliceDb).update({ isUnlocked: true, unlockProgress: 1.0 }));
+
+  // Recipient can unlock after purchase & either participant can store translatedText
+  await assertSucceeds(msgRef(bobDb).update({ isUnlocked: true, unlockProgress: 1.0 }));
+  await assertSucceeds(msgRef(bobDb).update({ translatedText: "مترجم" }));
+});
+
+test("Matches and streams enforce participant and host ownership boundaries", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+  const eveDb = testEnv.authenticatedContext("eve_789").firestore();
+  const now = new Date(Date.now() - 1000);
+
+  await assertSucceeds(
+    aliceDb.collection("matches").doc("match_1").set({
+      participantIds: [ALICE_UID, BOB_UID],
+      chatType: "VIDEO",
+      status: "ACTIVE",
+      createdAt: now,
+    })
+  );
+  await assertSucceeds(
+    bobDb.collection("matches").doc("match_1").collection("messages").doc("mm1").set({
+      senderId: BOB_UID,
+      senderName: "Bob",
+      text: "Hi Alice!",
+      timestamp: Date.now(),
+    })
+  );
+  await assertFails(eveDb.collection("matches").doc("match_1").get());
+  await assertFails(
+    eveDb.collection("matches").doc("match_1").collection("messages").doc("mm2").set({
+      senderId: "eve_789",
+      senderName: "Eve",
+      text: "Intruder",
+      timestamp: Date.now(),
+    })
+  );
+
+  // Streams: host can create/update/delete; non-host cannot update/delete stream
+  await assertSucceeds(
+    aliceDb.collection("streams").doc("stream_1").set({
+      hostId: ALICE_UID,
+      hostName: "Alice",
+      title: "Live Room",
+      roomName: "lk_stream_1",
+      status: "LIVE",
+    })
+  );
+  await assertSucceeds(
+    bobDb.collection("streams").doc("stream_1").collection("messages").doc("sm1").set({
+      senderId: BOB_UID,
+      originalText: "Great stream!",
+    })
+  );
+  await assertFails(bobDb.collection("streams").doc("stream_1").update({ title: "Hijacked" }));
+  await assertFails(bobDb.collection("streams").doc("stream_1").delete());
+  await assertSucceeds(aliceDb.collection("streams").doc("stream_1").collection("messages").doc("sm1").delete());
+  await assertSucceeds(aliceDb.collection("streams").doc("stream_1").delete());
+});
+

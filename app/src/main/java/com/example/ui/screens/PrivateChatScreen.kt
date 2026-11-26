@@ -93,6 +93,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
 import com.example.data.model.FriendItem
 import com.example.data.model.PrivateChatMessage
@@ -103,6 +104,7 @@ import com.example.ui.theme.AyerCyan
 import com.example.ui.theme.AyerGold
 import com.example.ui.theme.AyerPrimary
 import com.example.ui.theme.HuhTheme
+import com.example.util.MediaImageHelper
 import com.example.util.VoiceAudioHelper
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -117,6 +119,7 @@ fun PrivateChatScreen(
 ) {
     BackHandler(onBack = onBack)
 
+    val featureFlags by viewModel.featureFlags.collectAsStateWithLifecycle()
     val isDark = HuhTheme.colors.isDark
     var textInput by remember { mutableStateOf("") }
     var selectedTextColor by remember { mutableStateOf(if (isDark) "#FFFFFF" else "#0F172A") }
@@ -380,6 +383,7 @@ fun PrivateChatScreen(
                                 onTranslate = { textToTranslate ->
                                     viewModel.translatePrivateMessage(friend.id, msg.id, textToTranslate)
                                 },
+                                paidMediaEnabled = featureFlags.paidMediaEnabled,
                                 onUnlock = { price ->
                                     viewModel.unlockMediaMessage(friend.id, msg.id, price)
                                 }
@@ -516,22 +520,24 @@ fun PrivateChatScreen(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        // Media Locked Button
-                        IconButton(
-                            onClick = { showMediaSendDialog = true },
-                            modifier = Modifier
-                                .size(40.dp)
-                                .background(HuhTheme.colors.gold.copy(alpha = 0.15f), CircleShape)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Image,
-                                contentDescription = "إرسال صورة مغلقة",
-                                tint = HuhTheme.colors.gold,
-                                modifier = Modifier.size(20.dp)
-                            )
-                        }
+                        // Media Locked Button (enabled only when paidMediaEnabled feature flag is active)
+                        if (featureFlags.paidMediaEnabled) {
+                            IconButton(
+                                onClick = { showMediaSendDialog = true },
+                                modifier = Modifier
+                                    .size(40.dp)
+                                    .background(HuhTheme.colors.gold.copy(alpha = 0.15f), CircleShape)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Image,
+                                    contentDescription = "إرسال صورة مغلقة",
+                                    tint = HuhTheme.colors.gold,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
 
-                        Spacer(modifier = Modifier.width(4.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                        }
 
                         // Voice Message Button (Hardware Microphone)
                         IconButton(
@@ -700,6 +706,7 @@ fun ChatMessageBubble(
     isPlayingVoice: Boolean = false,
     onToggleVoicePlay: () -> Unit = {},
     onTranslate: (String) -> Unit = {},
+    paidMediaEnabled: Boolean = false,
     onUnlock: (Int) -> Unit
 ) {
     val isMe = message.senderId == "me" ||
@@ -817,7 +824,7 @@ fun ChatMessageBubble(
                     }
                 }
 
-                val mediaModel: Any? = message.mediaUri?.takeIf { it.isNotBlank() } ?: message.mediaResId
+                val mediaModel: Any? = MediaImageHelper.toCoilModel(message.mediaUri, message.mediaResId)
                 if (mediaModel != null) {
                     Spacer(modifier = Modifier.height(6.dp))
                     Box(
@@ -850,12 +857,14 @@ fun ChatMessageBubble(
                                     modifier = Modifier
                                         .fillMaxSize()
                                         .background(Color.Black.copy(alpha = 0.65f))
-                                        .pointerInput(Unit) {
-                                            detectDragGestures { change, _ ->
-                                                change.consume()
-                                                scratchProgress = (scratchProgress + 0.05f).coerceAtMost(1f)
-                                                if (scratchProgress >= 0.8f && !message.isUnlocked) {
-                                                    onUnlock(message.mediaPriceCoins)
+                                        .pointerInput(paidMediaEnabled) {
+                                            if (paidMediaEnabled) {
+                                                detectDragGestures { change, _ ->
+                                                    change.consume()
+                                                    scratchProgress = (scratchProgress + 0.05f).coerceAtMost(1f)
+                                                    if (scratchProgress >= 0.8f && !message.isUnlocked) {
+                                                        onUnlock(message.mediaPriceCoins)
+                                                    }
                                                 }
                                             }
                                         },
@@ -872,18 +881,25 @@ fun ChatMessageBubble(
                                         )
                                         Spacer(modifier = Modifier.height(4.dp))
                                         Text(
-                                            text = "المطلوب: ${message.mediaPriceCoins} نقطة للمشاهدة",
+                                            text = if (paidMediaEnabled) "المطلوب: ${message.mediaPriceCoins} نقطة للمشاهدة"
+                                            else "فتح الوسائط المدفوعة متوقف مؤقتاً أثناء المراجعة",
                                             color = AyerGold,
                                             fontWeight = FontWeight.SemiBold,
-                                            fontSize = 13.sp
+                                            fontSize = 12.sp
                                         )
                                         Spacer(modifier = Modifier.height(8.dp))
                                         Button(
                                             onClick = { onUnlock(message.mediaPriceCoins) },
+                                            enabled = paidMediaEnabled,
                                             colors = ButtonDefaults.buttonColors(containerColor = AyerGold),
                                             shape = RoundedCornerShape(12.dp)
                                         ) {
-                                            Text("اسحب أو اضغط لفتح الصورة", color = Color.Black, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                            Text(
+                                                text = if (paidMediaEnabled) "اسحب أو اضغط لفتح الصورة" else "متوقف مؤقتاً",
+                                                color = Color.Black,
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.Bold
+                                            )
                                         }
                                     }
                                 }
@@ -901,13 +917,18 @@ fun SendPaidMediaDialog(
     onDismiss: () -> Unit,
     onSend: (mediaUri: String, priceCoins: Int) -> Unit
 ) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     var priceStr by remember { mutableStateOf("50") }
     var selectedMediaUri by remember { mutableStateOf<String?>(null) }
+    var isEncoding by remember { mutableStateOf(false) }
+    var mediaError by remember { mutableStateOf<String?>(null) }
 
     val photoPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia()
     ) { uri ->
         selectedMediaUri = uri?.toString()
+        mediaError = null
     }
 
     AlertDialog(
@@ -926,6 +947,7 @@ fun SendPaidMediaDialog(
                             PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
                         )
                     },
+                    enabled = !isEncoding,
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(12.dp),
                     border = BorderStroke(1.dp, HuhTheme.colors.primary.copy(alpha = 0.6f))
@@ -941,13 +963,21 @@ fun SendPaidMediaDialog(
 
                 if (selectedMediaUri != null) {
                     AsyncImage(
-                        model = selectedMediaUri,
+                        model = MediaImageHelper.toCoilModel(selectedMediaUri, null),
                         contentDescription = "معاينة الصورة",
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(120.dp)
                             .clip(RoundedCornerShape(12.dp)),
                         contentScale = ContentScale.Crop
+                    )
+                }
+
+                if (!mediaError.isNullOrBlank()) {
+                    Text(
+                        text = mediaError.orEmpty(),
+                        color = HuhTheme.colors.error,
+                        fontSize = 12.sp
                     )
                 }
 
@@ -970,16 +1000,30 @@ fun SendPaidMediaDialog(
                 onClick = {
                     val uri = selectedMediaUri ?: return@Button
                     val p = (priceStr.toIntOrNull() ?: 50).coerceAtLeast(1)
-                    onSend(uri, p)
+                    if (uri.startsWith("data:image", ignoreCase = true) || uri.startsWith("https://", ignoreCase = true)) {
+                        onSend(uri, p)
+                    } else {
+                        isEncoding = true
+                        mediaError = null
+                        scope.launch {
+                            val encoded = MediaImageHelper.encodeUriToDataUri(context, uri)
+                            isEncoding = false
+                            encoded.onSuccess { dataUri ->
+                                onSend(dataUri, p)
+                            }.onFailure { err ->
+                                mediaError = err.message ?: "تعذر معالجة الصورة المختارة."
+                            }
+                        }
+                    }
                 },
-                enabled = selectedMediaUri != null,
+                enabled = selectedMediaUri != null && !isEncoding,
                 colors = ButtonDefaults.buttonColors(containerColor = HuhTheme.colors.gold)
             ) {
-                Text("إرسال الآن", color = Color.Black, fontWeight = FontWeight.Bold)
+                Text(if (isEncoding) "جارٍ التجهيز..." else "إرسال الآن", color = Color.Black, fontWeight = FontWeight.Bold)
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) {
+            TextButton(onClick = onDismiss, enabled = !isEncoding) {
                 Text("إلغاء", color = HuhTheme.colors.textSecondary)
             }
         },

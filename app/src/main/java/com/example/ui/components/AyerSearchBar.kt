@@ -44,19 +44,13 @@ fun AyerSearchBar(
     onQueryChange: (String) -> Unit,
     onSearchSubmitted: (String) -> Unit,
     modifier: Modifier = Modifier,
-    placeholderText: String = "بحث عن بث أو دولة أو الرمز السري... 🔍"
+    placeholderText: String = "بحث عن بث مباشر أو دولة... 🔍"
 ) {
     val focusManager = LocalFocusManager.current
 
     OutlinedTextField(
         value = query,
-        onValueChange = { newText ->
-            onQueryChange(newText)
-            // Immediately check for secret unlock as user types
-            if (newText.length >= 4) {
-                onSearchSubmitted(newText)
-            }
-        },
+        onValueChange = onQueryChange,
         placeholder = {
             Text(
                 text = placeholderText,
@@ -73,28 +67,18 @@ fun AyerSearchBar(
             )
         },
         trailingIcon = {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                if (query.isNotEmpty()) {
-                    IconButton(
-                        onClick = { onQueryChange("") },
-                        modifier = Modifier.size(28.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Clear,
-                            contentDescription = "مسح",
-                            tint = Color.Gray,
-                            modifier = Modifier.size(16.dp)
-                        )
-                    }
+            if (query.isNotEmpty()) {
+                IconButton(
+                    onClick = { onQueryChange("") },
+                    modifier = Modifier.size(28.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Clear,
+                        contentDescription = "مسح",
+                        tint = Color.Gray,
+                        modifier = Modifier.size(16.dp)
+                    )
                 }
-                Icon(
-                    imageVector = Icons.Default.Lock,
-                    contentDescription = "حماية مشفرة",
-                    tint = AyerSurfaceVariant,
-                    modifier = Modifier
-                        .padding(end = 8.dp)
-                        .size(16.dp)
-                )
             }
         },
         modifier = modifier

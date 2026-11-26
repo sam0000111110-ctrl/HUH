@@ -42,6 +42,31 @@ function sendJson(res, statusCode, payload) {
   res.end(body);
 }
 
+function parseBoolFlag(value, defaultValue = false) {
+  if (value === undefined || value === null || String(value).trim() === '') return defaultValue;
+  return String(value).trim().toLowerCase() === 'true';
+}
+
+export function resolveFeatureFlags(env = process.env) {
+  return {
+    payoutsEnabled: parseBoolFlag(env.PAYOUTS_ENABLED, false),
+    missionRewardsEnabled: parseBoolFlag(env.MISSION_REWARDS_ENABLED, false),
+    paidMediaEnabled: parseBoolFlag(env.PAID_MEDIA_ENABLED, false),
+    agenciesEnabled: parseBoolFlag(env.AGENCIES_ENABLED, false)
+  };
+}
+
+function assertFeatureEnabled(enabled, featureCode, arabicLabel) {
+  if (!enabled) {
+    throw new CallEngineError(
+      'FEATURE_DISABLED',
+      `ميزة ${arabicLabel} متوقفة مؤقتاً (${featureCode}) حتى استكمال مراجعة الأمان والمالية.`,
+      503,
+      { feature: featureCode }
+    );
+  }
+}
+
 function loadPersistedState(dataFile) {
   if (!dataFile) return null;
   try {
@@ -114,6 +139,7 @@ export function createCallServer({
   };
 
   const save = () => persistState(dataFile, callEngine);
+  const featureFlags = resolveFeatureFlags(env);
 
   const server = http.createServer(async (req, res) => {
     try {
@@ -128,8 +154,13 @@ export function createCallServer({
           provider: 'livekit',
           livekitConfigured: Boolean(livekitUrl && apiKey && apiSecret),
           storageMode: activeLedger.mode,
-          playBillingConfigured: Boolean(env.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON || env.GOOGLE_PLAY_ACCESS_TOKEN)
+          playBillingConfigured: Boolean(env.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON || env.GOOGLE_PLAY_ACCESS_TOKEN),
+          featureFlags
         });
+      }
+
+      if (method === 'GET' && pathname === '/api/config/flags') {
+        return sendJson(res, 200, featureFlags);
       }
 
       // LiveKit Server Webhook handler (no user bearer token; uses LiveKit signed Authorization JWT)
@@ -188,16 +219,27 @@ export function createCallServer({
             isAdmin: true
           });
         }
-        return sendJson(res, 200, summary);
+        return sendJson(res, 200, { ...summary, featureFlags });
       }
 
       if (method === 'GET' && pathname === '/api/wallet/summary') {
         const limit = Number(parsedUrl.searchParams.get('limit') || '50');
-        return sendJson(res, 200, await activeLedger.getWalletSummary(user.uid, limit));
+        const summary = await activeLedger.getWalletSummary(user.uid, limit);
+        return sendJson(res, 200, { ...summary, featureFlags });
       }
 
       if (method === 'POST' && pathname === '/api/wallet/daily-bonus') {
         const result = await activeLedger.claimDailyBonus({ uid: user.uid });
+        return sendJson(res, 200, result);
+      }
+
+      if (method === 'POST' && pathname === '/api/wallet/mission-reward') {
+        assertFeatureEnabled(featureFlags.missionRewardsEnabled, 'MISSION_REWARDS_ENABLED', 'مكافآت المهام');
+        const body = await readJsonBody(req);
+        const result = await activeLedger.claimMissionReward({
+          uid: user.uid,
+          missionId: body.missionId
+        });
         return sendJson(res, 200, result);
       }
 
@@ -217,6 +259,10 @@ export function createCallServer({
 
       if (method === 'POST' && pathname === '/api/wallet/gift') {
         const body = await readJsonBody(req);
+        const isPaidMedia = String(body.giftId || '').startsWith('media_') || body.isPaidMedia === true;
+        if (isPaidMedia) {
+          assertFeatureEnabled(featureFlags.paidMediaEnabled, 'PAID_MEDIA_ENABLED', 'فتح الوسائط المدفوعة');
+        }
         const activeStream = body.streamId ? realtimeEngine.getStream(body.streamId) : null;
         const resolvedRecipient = body.recipientUid || activeStream?.hostUid || '';
         const result = await activeLedger.sendGiftAtomic({
@@ -285,10 +331,21 @@ export function createCallServer({
       // Agency Dashboard & Bank Payout Requests
       // ==========================================================
       if (method === 'GET' && pathname === '/api/agency/dashboard') {
+        assertFeatureEnabled(featureFlags.agenciesEnabled, 'AGENCIES_ENABLED', 'لوحة الوكالات');
         return sendJson(res, 200, await activeLedger.getAgencyDashboard(user.uid));
       }
 
+      if (method === 'POST' && pathname === '/api/host/apply') {
+        assertFeatureEnabled(featureFlags.agenciesEnabled, 'AGENCIES_ENABLED', 'التقديم كمضيف');
+        const body = await readJsonBody(req);
+        return sendJson(res, 200, await activeLedger.applyForHost({
+          uid: user.uid,
+          agencyName: body.agencyName || ''
+        }));
+      }
+
       if (method === 'POST' && pathname === '/api/agency/sub-agents') {
+        assertFeatureEnabled(featureFlags.agenciesEnabled, 'AGENCIES_ENABLED', 'إدارة الوكلاء');
         const body = await readJsonBody(req);
         return sendJson(res, 201, await activeLedger.recruitSubAgent({
           agentUid: user.uid,
@@ -299,6 +356,7 @@ export function createCallServer({
       }
 
       if (method === 'POST' && pathname === '/api/payouts/request') {
+        assertFeatureEnabled(featureFlags.payoutsEnabled, 'PAYOUTS_ENABLED', 'سحب الأرباح');
         const body = await readJsonBody(req);
         const created = await activeLedger.createPayoutRequest({
           uid: user.uid,
@@ -312,6 +370,7 @@ export function createCallServer({
       }
 
       if (method === 'GET' && pathname === '/api/payouts') {
+        assertFeatureEnabled(featureFlags.payoutsEnabled, 'PAYOUTS_ENABLED', 'سحب الأرباح');
         const status = parsedUrl.searchParams.get('status') || null;
         const items = await activeLedger.listPayoutRequests({ uid: user.uid, isAdmin: false, status });
         return sendJson(res, 200, { payouts: items });
@@ -579,6 +638,7 @@ export function createCallServer({
         }
 
         if (method === 'GET' && pathname === '/api/admin/payouts') {
+          assertFeatureEnabled(featureFlags.payoutsEnabled, 'PAYOUTS_ENABLED', 'مراجعة السحوبات');
           const status = parsedUrl.searchParams.get('status') || null;
           return sendJson(res, 200, {
             payouts: await activeLedger.listPayoutRequests({ uid: user.uid, isAdmin: true, status })
@@ -587,6 +647,7 @@ export function createCallServer({
 
         const payoutReviewMatch = pathname.match(/^\/api\/admin\/payouts\/([^/]+)\/review$/);
         if (method === 'POST' && payoutReviewMatch) {
+          assertFeatureEnabled(featureFlags.payoutsEnabled, 'PAYOUTS_ENABLED', 'مراجعة السحوبات');
           const body = await readJsonBody(req);
           const result = await activeLedger.reviewPayoutRequest({
             reviewerUid: user.uid,

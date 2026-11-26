@@ -87,6 +87,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.R
 import com.example.calls.CallLifecycleState
 import com.example.calls.CallLiveKitEngine
+import com.example.calls.CallSubtitleSpeechHelper
 import com.example.ui.AyerViewModel
 import com.example.ui.theme.AyerCyan
 import com.example.ui.theme.AyerGold
@@ -388,15 +389,13 @@ fun CallScreen(
                         .background(AyerGold.copy(alpha = 0.20f))
                 )
 
-                val avatarRes = participantAvatarRes ?: R.drawable.img_live_model_1
-                Image(
-                    painter = painterResource(id = avatarRes),
-                    contentDescription = participantName,
-                    modifier = Modifier
-                        .size(110.dp)
-                        .clip(CircleShape)
-                        .border(3.dp, AyerGold, CircleShape),
-                    contentScale = ContentScale.Crop
+                com.example.ui.components.UserInitialAvatar(
+                    name = participantName,
+                    avatarResId = participantAvatarRes,
+                    size = 110.dp,
+                    borderWidth = 3.dp,
+                    borderColor = AyerGold,
+                    fontSize = 32.sp
                 )
 
                 val centerStatus = when (callState) {
@@ -1073,6 +1072,38 @@ fun CallScreen(
             callPermissionsLauncher.launch(needed.toTypedArray())
         } else {
             permissionWarning = null
+        }
+    }
+
+    val speechHelper = remember(context) {
+        CallSubtitleSpeechHelper(context) { spokenText ->
+            viewModel.translateCallSubtitle(spokenText)
+        }
+    }
+    DisposableEffect(Unit) {
+        onDispose { speechHelper.stop() }
+    }
+
+    val activeSession = callSession
+    DisposableEffect(
+        activeSession?.callId,
+        activeSession?.callState,
+        activeSession?.isTranslationEnabled,
+        activeSession?.isMuted,
+        permissionWarning
+    ) {
+        val shouldCaptureSpeech = activeSession != null &&
+            activeSession.callState == CallLifecycleState.ACTIVE &&
+            activeSession.isTranslationEnabled &&
+            !activeSession.isMuted &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+        if (shouldCaptureSpeech) {
+            speechHelper.start()
+        } else {
+            speechHelper.stop()
+        }
+        onDispose {
+            speechHelper.stop()
         }
     }
 

@@ -865,4 +865,54 @@ class FirestoreChatService(private val context: Context) {
             }
         }
     }
+
+    suspend fun saveFcmToken(uid: String, token: String): Result<Unit> {
+        val fs = firestore ?: return Result.failure(IllegalStateException("Firestore unavailable"))
+        val authUid = currentUid()
+        if (uid.isBlank() || token.isBlank() || authUid != uid) {
+            return Result.failure(SecurityException("المصادقة مطلوبة لحفظ رمز الإشعارات."))
+        }
+        return try {
+            fs.collection("users").document(uid)
+                .collection("private_settings").document("notifications")
+                .set(
+                    hashMapOf<String, Any>(
+                        "fcmToken" to token,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    ),
+                    SetOptions.merge()
+                )
+                .await()
+            Result.success(Unit)
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.WRITE, "users/$uid/private_settings/notifications")
+            Result.failure(e)
+        }
+    }
+
+    suspend fun deleteCurrentUserAccountData(uid: String): Result<Unit> {
+        val fs = firestore ?: return Result.success(Unit)
+        val authUid = currentUid()
+        if (uid.isBlank() || authUid != uid) {
+            return Result.failure(SecurityException("المصادقة مطلوبة لحذف بيانات المستخدم."))
+        }
+        return try {
+            val userRef = fs.collection("users").document(uid)
+            val subcollections = listOf("private_settings", "blocks", "friends", "badges", "activity")
+            for (sub in subcollections) {
+                val snap = runCatching { userRef.collection(sub).get().await() }.getOrNull()
+                if (snap != null) {
+                    for (doc in snap.documents) {
+                        runCatching { doc.reference.delete().await() }
+                    }
+                }
+            }
+            runCatching { fs.collection("age_verifications").document(uid).delete().await() }
+            userRef.delete().await()
+            Result.success(Unit)
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.DELETE, "users/$uid")
+            Result.failure(e)
+        }
+    }
 }

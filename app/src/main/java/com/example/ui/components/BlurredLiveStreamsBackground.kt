@@ -72,91 +72,39 @@ fun BlurredLiveStreamsBackground(
         label = "ambient_drift_2"
     )
 
-    // Fallback stream items if popularStreams is empty
-    val baseStreams = if (popularStreams.isNotEmpty()) {
-        popularStreams
-    } else {
-        listOf(
-            LiveStreamRoom(
-                id = "bg_stream_1",
-                title = "سهرة طرب وعزف عود لايف 🎶",
-                hostName = "ليان الدوسري",
-                hostCountryCode = "🇸🇦",
-                viewersCount = 1420,
-                imageResId = R.drawable.img_live_model_1
-            ),
-            LiveStreamRoom(
-                id = "bg_stream_2",
-                title = "دردشة وتعارف وسوالف ممتعة ✨",
-                hostName = "ريناد الحسيني",
-                hostCountryCode = "🇦🇪",
-                viewersCount = 1890,
-                imageResId = R.drawable.img_live_model_2
-            ),
-            LiveStreamRoom(
-                id = "bg_stream_3",
-                title = "جلسة سهر وتحديات وأجواء ساحرة 🔥",
-                hostName = "نور الشام",
-                hostCountryCode = "🇱🇧",
-                viewersCount = 2450,
-                imageResId = R.drawable.img_live_model_3
-            ),
-            LiveStreamRoom(
-                id = "bg_stream_4",
-                title = "بطولة وتحدي جيمنج لايف PUBG 🎮",
-                hostName = "سامر إكس جيمر",
-                hostCountryCode = "🇰🇼",
-                viewersCount = 3120,
-                imageResId = R.drawable.stream_hero_bg
-            ),
-            LiveStreamRoom(
-                id = "bg_stream_5",
-                title = "بودكاست ومناقشات ليلية هادئة 🌙",
-                hostName = "أحمد خالد",
-                hostCountryCode = "🇪🇬",
-                viewersCount = 980,
-                imageResId = R.drawable.img_live_model_1
-            ),
-            LiveStreamRoom(
-                id = "bg_stream_6",
-                title = "تحديات وهدايا ودعم مباشر 💎",
-                hostName = "فاطمة الزهراء",
-                hostCountryCode = "🇲🇦",
-                viewersCount = 1730,
-                imageResId = R.drawable.img_live_model_2
-            )
-        )
-    }
+    val baseStreams = popularStreams
 
-    // Prepare looping streams for two distinct rows
     val topRowStreams = remember(baseStreams) {
-        val list = baseStreams
-        List(100) { index -> list[index % list.size] }
+        if (baseStreams.isEmpty()) emptyList()
+        else List(20) { index -> baseStreams[index % baseStreams.size] }
     }
 
     val bottomRowStreams = remember(baseStreams) {
-        val list = baseStreams.reversed()
-        List(100) { index -> list[index % list.size] }
+        if (baseStreams.isEmpty()) emptyList()
+        else {
+            val rev = baseStreams.reversed()
+            List(20) { index -> rev[index % rev.size] }
+        }
     }
 
-    // List states for the two smooth scrolling rows
-    val topListState = rememberLazyListState(initialFirstVisibleItemIndex = 20)
-    val bottomListState = rememberLazyListState(initialFirstVisibleItemIndex = 30)
+    val topListState = rememberLazyListState()
+    val bottomListState = rememberLazyListState()
 
-    // Continuous smooth movement from Right to Left (scrollBy positive increments in RTL layout)
-    LaunchedEffect(topListState) {
+    LaunchedEffect(topRowStreams.isNotEmpty()) {
+        if (topRowStreams.isEmpty()) return@LaunchedEffect
         while (isActive) {
             try {
-                topListState.scrollBy(1.7f)
+                topListState.scrollBy(1.5f)
             } catch (_: Exception) { }
             delay(16)
         }
     }
 
-    LaunchedEffect(bottomListState) {
+    LaunchedEffect(bottomRowStreams.isNotEmpty()) {
+        if (bottomRowStreams.isEmpty()) return@LaunchedEffect
         while (isActive) {
             try {
-                bottomListState.scrollBy(2.1f)
+                bottomListState.scrollBy(1.9f)
             } catch (_: Exception) { }
             delay(16)
         }
@@ -167,65 +115,64 @@ fun BlurredLiveStreamsBackground(
             .fillMaxSize()
             .background(Color(0xFF060913))
     ) {
-        // 1. Dual Carousel of Large, Live Moving Stream Cards (Moving from Right to Left)
-        Column(
-            modifier = Modifier.fillMaxSize(),
-            verticalArrangement = Arrangement.SpaceEvenly
-        ) {
-            // TOP MOVING ROW OF LIVE STREAMS
-            LazyRow(
-                state = topListState,
-                horizontalArrangement = Arrangement.spacedBy(18.dp),
-                contentPadding = PaddingValues(horizontal = 8.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(340.dp),
-                userScrollEnabled = false,
-                verticalAlignment = Alignment.CenterVertically
+        if (baseStreams.isNotEmpty()) {
+            Column(
+                modifier = Modifier.fillMaxSize(),
+                verticalArrangement = Arrangement.SpaceEvenly
             ) {
-                items(topRowStreams) { stream ->
-                    CachedLiveStreamVideoCard(
-                        stream = stream,
-                        onClick = { },
-                        modifier = Modifier
-                            .width(235.dp)
-                            .height(325.dp),
-                        height = 325.dp,
-                        showMuteBadge = true,
-                        showDetails = true,
-                        initCacheDelayMillis = 100L
-                    )
+                LazyRow(
+                    state = topListState,
+                    horizontalArrangement = Arrangement.spacedBy(18.dp),
+                    contentPadding = PaddingValues(horizontal = 8.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(340.dp),
+                    userScrollEnabled = false,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    items(topRowStreams) { stream ->
+                        CachedLiveStreamVideoCard(
+                            stream = stream,
+                            onClick = { },
+                            modifier = Modifier
+                                .width(235.dp)
+                                .height(325.dp),
+                            height = 325.dp,
+                            showMuteBadge = true,
+                            showDetails = true,
+                            initCacheDelayMillis = 100L
+                        )
+                    }
                 }
-            }
 
-            // BOTTOM MOVING ROW OF LIVE STREAMS (Higher velocity for cinematic parallax)
-            LazyRow(
-                state = bottomListState,
-                horizontalArrangement = Arrangement.spacedBy(18.dp),
-                contentPadding = PaddingValues(horizontal = 8.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(340.dp),
-                userScrollEnabled = false,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                items(bottomRowStreams) { stream ->
-                    CachedLiveStreamVideoCard(
-                        stream = stream,
-                        onClick = { },
-                        modifier = Modifier
-                            .width(235.dp)
-                            .height(325.dp),
-                        height = 325.dp,
-                        showMuteBadge = true,
-                        showDetails = true,
-                        initCacheDelayMillis = 150L
-                    )
+                LazyRow(
+                    state = bottomListState,
+                    horizontalArrangement = Arrangement.spacedBy(18.dp),
+                    contentPadding = PaddingValues(horizontal = 8.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(340.dp),
+                    userScrollEnabled = false,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    items(bottomRowStreams) { stream ->
+                        CachedLiveStreamVideoCard(
+                            stream = stream,
+                            onClick = { },
+                            modifier = Modifier
+                                .width(235.dp)
+                                .height(325.dp),
+                            height = 325.dp,
+                            showMuteBadge = true,
+                            showDetails = true,
+                            initCacheDelayMillis = 150L
+                        )
+                    }
                 }
             }
         }
 
-        // 2. Crystal Ambient Scrim (Substantially lightened so live streams are ultra vivid and sharp)
+        // Ambient Scrim
         Box(
             modifier = Modifier
                 .fillMaxSize()

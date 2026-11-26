@@ -31,7 +31,6 @@ import com.example.data.model.MatchChatType
 import com.example.data.model.NotificationType
 import com.example.data.model.PointTransaction
 import com.example.data.model.PrivateChatMessage
-import com.example.data.model.SecondaryProfile
 import com.example.data.model.StreamMessage
 import com.example.data.model.UserEngagementState
 import com.example.data.model.UserProfile
@@ -96,7 +95,7 @@ class AyerViewModel(application: Application) : AndroidViewModel(application) {
     val transactions: StateFlow<List<PointTransaction>>
     val notifications: StateFlow<List<AppNotification>>
     val unreadNotificationCount: StateFlow<Int>
-    val secondaryProfiles: StateFlow<List<SecondaryProfile>>
+    val featureFlags: StateFlow<com.example.data.remote.FeatureFlagsDto>
     val engagementState: StateFlow<UserEngagementState>
     val dailyMissions: StateFlow<List<DailyMissionItem>>
     val flaggedStreamIds: StateFlow<Set<String>>
@@ -142,10 +141,6 @@ class AyerViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _ageVerificationError = MutableStateFlow<String?>(null)
     val ageVerificationError: StateFlow<String?> = _ageVerificationError.asStateFlow()
-
-    // Hidden Secondary Profile State
-    private val _activeSecondaryProfile = MutableStateFlow<SecondaryProfile?>(null)
-    val activeSecondaryProfile = _activeSecondaryProfile.asStateFlow()
 
     // Account Security & Transparency State
     private val _isTwoFactorAuthEnabled = MutableStateFlow(true)
@@ -338,9 +333,9 @@ class AyerViewModel(application: Application) : AndroidViewModel(application) {
             application,
             db.userDao(),
             db.transactionDao(),
-            db.notificationDao(),
-            db.secondaryProfileDao()
+            db.notificationDao()
         )
+        featureFlags = repository.featureFlags
 
         lateinit var billingRef: PlayBillingManager
         billingRef = PlayBillingManager(
@@ -440,12 +435,6 @@ class AyerViewModel(application: Application) : AndroidViewModel(application) {
             0
         )
 
-        secondaryProfiles = repository.getSecondaryProfiles().stateIn(
-            viewModelScope,
-            SharingStarted.WhileSubscribed(5000),
-            emptyList()
-        )
-
         engagementState = repository.engagementState.stateIn(
             viewModelScope,
             SharingStarted.WhileSubscribed(5000),
@@ -493,6 +482,7 @@ class AyerViewModel(application: Application) : AndroidViewModel(application) {
 
         viewModelScope.launch {
             callGovernanceManager.ensureDefaultConfig()
+            repository.refreshFeatureFlags()
         }
 
         val firebaseAuth = auth
@@ -584,6 +574,10 @@ class AyerViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun claimEngagementReward() {
+        if (!featureFlags.value.missionRewardsEnabled) {
+            _uiNotice.value = "مكافآت المهام متوقفة مؤقتاً أثناء المراجعة."
+            return
+        }
         viewModelScope.launch {
             val success = repository.claimDailyMilestoneReward()
             if (success) {
@@ -1069,6 +1063,7 @@ class AyerViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun refreshAgencyDashboard() {
+        if (!featureFlags.value.agenciesEnabled) return
         viewModelScope.launch {
             repository.refreshAgencyDashboard()
         }
@@ -1082,6 +1077,11 @@ class AyerViewModel(application: Application) : AndroidViewModel(application) {
         ibanOrAccount: String,
         onComplete: (Boolean) -> Unit = {}
     ) {
+        if (!featureFlags.value.payoutsEnabled) {
+            _uiNotice.value = "طلبات السحب المالي متوقفة مؤقتاً أثناء المراجعة."
+            onComplete(false)
+            return
+        }
         viewModelScope.launch {
             val res = repository.requestBankPayout(
                 amountCoins = amountCoins,
@@ -1101,13 +1101,25 @@ class AyerViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun withdrawHostEarnings(coins: Int) {
+        if (!featureFlags.value.payoutsEnabled) {
+            _uiNotice.value = "طلبات السحب المالي متوقفة مؤقتاً أثناء المراجعة."
+            return
+        }
         _uiNotice.value = "يرجى تعبئة بيانات الحساب البنكي في نموذج سحب الأرباح لتقديم الطلب للمراجعة."
     }
 
     fun applyAsHost() {
+        if (!featureFlags.value.agenciesEnabled) {
+            _uiNotice.value = "طلبات المضيفين والوكالات متوقفة مؤقتاً أثناء المراجعة."
+            return
+        }
         viewModelScope.launch {
-            repository.applyForHost("الوكالة الماسية")
-            _uiNotice.value = "تم تقديم طلب انضمامك كمضيف معتمد. سيتم مراجعة الطلب من الإدارة."
+            val res = repository.applyForHost("الوكالة الماسية")
+            _uiNotice.value = if (res.isSuccess) {
+                "تم تقديم طلب انضمامك كمضيف معتمد. سيتم مراجعة الطلب من الإدارة."
+            } else {
+                res.exceptionOrNull()?.message ?: "تعذر تقديم طلب المضيف."
+            }
         }
     }
 
@@ -1128,6 +1140,10 @@ class AyerViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun recruitNewSubAgent(name: String, country: String) {
+        if (!featureFlags.value.agenciesEnabled) {
+            _uiNotice.value = "ميزة تسجيل الوكلاء الفرعيين متوقفة مؤقتاً أثناء المراجعة."
+            return
+        }
         viewModelScope.launch {
             val res = repository.recruitSubAgentResult(name, country)
             if (res.isSuccess) {
@@ -1267,86 +1283,6 @@ class AyerViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             repository.clearAllNotifications()
             _uiNotice.value = "تم مسح سجل الإشعارات."
-        }
-    }
-
-    // ==========================================
-    // Hidden Secondary Profile Actions
-    // ==========================================
-    fun createSecondaryProfile(
-        username: String,
-        password: String,
-        displayName: String,
-        bio: String = "بروفايل خاص محمي برمز سري",
-        notificationsEnabled: Boolean = false,
-        avatarResId: Int? = null,
-        onComplete: (Boolean, String) -> Unit
-    ) {
-        viewModelScope.launch {
-            val result = repository.createSecondaryProfile(
-                username = username,
-                password = password,
-                displayName = displayName,
-                bio = bio,
-                notificationsEnabled = notificationsEnabled,
-                avatarResId = avatarResId
-            )
-            result.fold(
-                onSuccess = { profile ->
-                    onComplete(true, "تم إنشاء البروفايل الثانوي بنجاح. تذكر: لا يظهر أي أثر له في الواجهة الرئيسية؛ للوصول إليه اكتب كلمة المرور الخاصة به في شريط البحث الرئيسي.")
-                    _uiNotice.value = "تم إنشاء البروفايل الثانوي بنجاح! للوصول إليه اكتب كلمة المرور في شريط البحث."
-                },
-                onFailure = { err ->
-                    onComplete(false, err.message ?: "فشل إنشاء البروفايل الثانوي")
-                }
-            )
-        }
-    }
-
-    /**
-     * Search-Unlock mechanism:
-     * When user enters a query in search bar, if it matches the secret password
-     * of an existing secondary profile belonging to the current user, it unlocks
-     * and switches to the hidden secondary profile interface seamlessly!
-     */
-    fun checkSearchUnlock(query: String): Boolean {
-        val trimmed = query.trim()
-        if (trimmed.length < 3) return false
-
-        // Check if query matches any secondary profile password
-        var unlocked = false
-        viewModelScope.launch {
-            val matched = repository.unlockSecondaryProfileByPassword(trimmed)
-            if (matched != null) {
-                _activeSecondaryProfile.value = matched
-                _uiNotice.value = "🎭 تم الانتقال للبروفايل الثانوي: '${matched.displayName}' بنجاح"
-                unlocked = true
-            }
-        }
-        return unlocked
-    }
-
-    fun lockSecondaryProfile() {
-        val name = _activeSecondaryProfile.value?.displayName ?: ""
-        _activeSecondaryProfile.value = null
-        _uiNotice.value = "🔒 تم قفل البروفايل والعودة للحساب الرئيسي بأمان بدون أي أثر."
-    }
-
-    fun toggleSecondaryProfileNotification(id: Long, enabled: Boolean) {
-        viewModelScope.launch {
-            repository.updateSecondaryProfileNotification(id, enabled)
-            _activeSecondaryProfile.value = _activeSecondaryProfile.value?.copy(notificationsEnabled = enabled)
-            _uiNotice.value = if (enabled) "تم تفعيل إشعارات البروفايل الثانوي" else "تم كتم إشعارات البروفايل الثانوي"
-        }
-    }
-
-    fun deleteSecondaryProfile(id: Long) {
-        viewModelScope.launch {
-            repository.deleteSecondaryProfile(id)
-            if (_activeSecondaryProfile.value?.id == id) {
-                _activeSecondaryProfile.value = null
-            }
-            _uiNotice.value = "تم حذف البروفايل الثانوي وسجلاته بأمان."
         }
     }
 
@@ -1904,6 +1840,11 @@ class AyerViewModel(application: Application) : AndroidViewModel(application) {
         _uiNotice.value = if (newPriority) "أولوية الصوت مفعلة: الصوت مستمر بدون تقطيع حتى لو تجمد الفيديو" else "تم تعطيل أولوية الصوت"
     }
 
+    @androidx.annotation.VisibleForTesting
+    internal fun setActiveCallSessionForTesting(session: ActiveCallSession?) {
+        _activeCallSession.value = session
+    }
+
     fun toggleCallTranslation() {
         val current = _activeCallSession.value ?: return
         val newTrans = !current.isTranslationEnabled
@@ -2080,6 +2021,11 @@ class AyerViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun claimDailyMissionReward(missionId: String, onResult: (Boolean) -> Unit = {}) {
+        if (!featureFlags.value.missionRewardsEnabled) {
+            _uiNotice.value = "مكافآت المهام متوقفة مؤقتاً أثناء المراجعة."
+            onResult(false)
+            return
+        }
         viewModelScope.launch {
             val success = repository.claimDailyMissionReward(missionId)
             if (success) {
@@ -2231,7 +2177,6 @@ class AyerViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 auth?.signOut()
                 repository.clearLocalSessionData()
-                _activeSecondaryProfile.value = null
                 _rawFriendsList.value = emptyList()
                 _firestoreBlockedUsers.value = emptySet()
                 _privateChatMessages.value = emptyMap()
@@ -2409,6 +2354,10 @@ class AyerViewModel(application: Application) : AndroidViewModel(application) {
         voiceFilePath: String? = null,
         voiceAudioBase64: String? = null
     ) {
+        if (voiceFilePath != null && voiceAudioBase64.isNullOrBlank()) {
+            _uiNotice.value = "المقطع الصوتي طويل جداً ولا يمكن إرساله عبر السحابة."
+            return
+        }
         val myUid = currentUserUid()
         viewModelScope.launch {
             if (!verifyPrivateMessageAllowed(friendId)) return@launch
@@ -2586,6 +2535,10 @@ class AyerViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun unlockMediaMessage(friendId: String, messageId: String, price: Int) {
+        if (!featureFlags.value.paidMediaEnabled) {
+            _uiNotice.value = "ميزة فتح المحتوى المدفوع متوقفة مؤقتاً أثناء المراجعة."
+            return
+        }
         val currentProfile = userProfile.value
         if (currentProfile == null || currentProfile.pointsBalance < price) {
             _uiNotice.value = "عذراً، رصيدك الحالي من النقاط لا يكفي لفتح هذا المحتوى ($price نقطة مطلوبة)"
@@ -2593,20 +2546,8 @@ class AyerViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         viewModelScope.launch {
-            val paid = repository.sendGift(
-                gift = GiftItem(
-                    id = "media_$messageId",
-                    name = "محتوى خاص",
-                    pointsCost = price,
-                    emoji = "🔓",
-                    soundEffectDesc = "فتح محتوى خاص"
-                ),
-                streamHost = friendId,
-                recipientUid = friendId,
-                streamId = messageId
-            )
-            if (paid) {
-                repository.markPrivateMediaUnlocked(friendId, messageId)
+            val unlockRes = repository.unlockPaidMedia(friendId, messageId, price)
+            if (unlockRes.isSuccess) {
                 val currentMap = _privateChatMessages.value.toMutableMap()
                 val currentList = currentMap[friendId] ?: emptyList()
                 currentMap[friendId] = currentList.map { msg ->
@@ -2615,7 +2556,7 @@ class AyerViewModel(application: Application) : AndroidViewModel(application) {
                 _privateChatMessages.value = currentMap
                 _uiNotice.value = "تم خصم $price نقطة وفتح المحتوى بنجاح!"
             } else {
-                _uiNotice.value = "تعذر إتمام عملية الدفع لفتح المحتوى."
+                _uiNotice.value = unlockRes.exceptionOrNull()?.message ?: "تعذر إتمام عملية الدفع لفتح المحتوى."
             }
         }
     }

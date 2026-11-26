@@ -20,6 +20,8 @@ import com.example.ui.screens.PrivateChatScreen
 import com.example.ui.theme.AyerTheme
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -58,7 +60,8 @@ class CallGovernanceAndLifecycleTest {
             notificationDao = db.notificationDao(),
             remoteApi = null,
             wallClockProvider = { fakeWallClockMs },
-            elapsedRealtimeProvider = { fakeMonoClockMs }
+            elapsedRealtimeProvider = { fakeMonoClockMs },
+            allowLocalPreviewForTests = true
         )
     }
 
@@ -350,5 +353,88 @@ class CallGovernanceAndLifecycleTest {
         composeRule.onNodeWithTag("call_budget_lazy_column")
             .performScrollToNode(hasTestTag("save_call_budget_config_button"))
         composeRule.onNodeWithTag("save_call_budget_config_button").assertIsDisplayed()
+    }
+
+    @Test
+    fun `default CallGovernanceManager fails closed when server URL auth or LiveKit token is missing`() = runBlocking {
+        // 1. Default production mode (allowLocalPreviewForTests = false) with no remoteApi -> Blocked
+        val unconfiguredManager = CallGovernanceManager(
+            callDao = db.callDao(),
+            notificationDao = db.notificationDao(),
+            remoteApi = null
+        )
+        val noServerOutcome = unconfiguredManager.initiateCall("u1", "سامر", "u2", "سارة", CallType.AUDIO)
+        assertTrue(noServerOutcome is CallInitiationOutcome.Blocked)
+        assertEquals("CALL_SERVER_NOT_CONFIGURED", (noServerOutcome as CallInitiationOutcome.Blocked).code)
+
+        // 2. Remote API present, blank auth token -> Blocked
+        var mode = "ERROR_500"
+        val stubApi = object : CallBackendApi {
+            override suspend fun initiateCall(
+                bearerToken: String,
+                body: InitiateCallRequestDto
+            ): retrofit2.Response<InitiateCallResponseDto> {
+                return when (mode) {
+                    "BLANK_TOKEN" -> retrofit2.Response.success(
+                        InitiateCallResponseDto(
+                            call = CallRecordDto(
+                                callId = "c_1",
+                                roomName = "r_1",
+                                callerId = "u1",
+                                callerName = "سامر",
+                                calleeId = "u2",
+                                calleeName = "سارة",
+                                callType = "AUDIO",
+                                status = "DIALING",
+                                initiatedAt = 1_780_000_000_000L
+                            ),
+                            livekitUrl = "",
+                            token = "",
+                            expiresAtMs = 1_780_000_300_000L,
+                            maxDurationSeconds = 1800
+                        )
+                    )
+                    else -> retrofit2.Response.error(
+                        500,
+                        "{\"error\":\"boom\"}".toResponseBody("application/json".toMediaType())
+                    )
+                }
+            }
+
+            override suspend fun acceptCall(bearerToken: String, callId: String) = throw UnsupportedOperationException()
+            override suspend fun rejectCall(bearerToken: String, callId: String, body: EndCallRequestDto) = throw UnsupportedOperationException()
+            override suspend fun reportConnectionState(bearerToken: String, callId: String, body: ConnectionStateRequestDto) = throw UnsupportedOperationException()
+            override suspend fun getReconnectToken(bearerToken: String, callId: String) = throw UnsupportedOperationException()
+            override suspend fun endCall(bearerToken: String, callId: String, body: EndCallRequestDto) = throw UnsupportedOperationException()
+            override suspend fun updateGovernanceConfig(bearerToken: String, config: CallConfigDto) = throw UnsupportedOperationException()
+            override suspend fun getGovernanceConfig(bearerToken: String) = throw UnsupportedOperationException()
+        }
+
+        val noAuthManager = CallGovernanceManager(
+            callDao = db.callDao(),
+            notificationDao = db.notificationDao(),
+            remoteApi = stubApi,
+            authTokenProvider = { null }
+        )
+        val noAuthOutcome = noAuthManager.initiateCall("u1", "سامر", "u2", "سارة", CallType.AUDIO)
+        assertTrue(noAuthOutcome is CallInitiationOutcome.Blocked)
+        assertEquals("AUTH_REQUIRED_FOR_CALL", (noAuthOutcome as CallInitiationOutcome.Blocked).code)
+
+        // 3. Remote API returns HTTP 500 -> Blocked
+        val authedManager = CallGovernanceManager(
+            callDao = db.callDao(),
+            notificationDao = db.notificationDao(),
+            remoteApi = stubApi,
+            authTokenProvider = { "valid-firebase-token" }
+        )
+        val error500Outcome = authedManager.initiateCall("u1", "سامر", "u2", "سارة", CallType.AUDIO)
+        assertTrue(error500Outcome is CallInitiationOutcome.Blocked)
+        assertEquals("BACKEND_ERROR_500", (error500Outcome as CallInitiationOutcome.Blocked).code)
+
+        // 4. Remote API returns HTTP 200 with blank LiveKit URL/token -> Blocked
+        mode = "BLANK_TOKEN"
+        val blankSessionOutcome = authedManager.initiateCall("u1", "سامر", "u2", "سارة", CallType.AUDIO)
+        assertTrue(blankSessionOutcome is CallInitiationOutcome.Blocked)
+        assertEquals("INVALID_CALL_SESSION", (blankSessionOutcome as CallInitiationOutcome.Blocked).code)
     }
 }

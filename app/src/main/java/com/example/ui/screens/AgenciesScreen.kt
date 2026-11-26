@@ -130,6 +130,7 @@ fun AgenciesScreen(
     val myPayouts by viewModel.myPayouts.collectAsStateWithLifecycle()
     val unreadNotificationCount by viewModel.unreadNotificationCount.collectAsStateWithLifecycle()
     val notifications by viewModel.notifications.collectAsStateWithLifecycle()
+    val featureFlags by viewModel.featureFlags.collectAsStateWithLifecycle()
     val withdrawableCoins = userProfile.subAgentsEarningsCoins + userProfile.hostEarningsCoins
 
     LazyColumn(
@@ -138,6 +139,28 @@ fun AgenciesScreen(
             .background(HuhTheme.colors.background)
             .padding(horizontal = 16.dp, vertical = 12.dp)
     ) {
+        if (!featureFlags.agenciesEnabled || !featureFlags.payoutsEnabled) {
+            item {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 12.dp)
+                        .testTag("agencies_feature_disabled_banner"),
+                    colors = CardDefaults.cardColors(containerColor = AyerGold.copy(alpha = 0.14f)),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, AyerGold.copy(alpha = 0.45f)),
+                    shape = RoundedCornerShape(14.dp)
+                ) {
+                    Text(
+                        text = "نظام الوكالات وطلبات السحب متوقف مؤقتاً أثناء المراجعة ولا يتوفر حالياً.",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = AyerGold,
+                        modifier = Modifier.padding(12.dp)
+                    )
+                }
+            }
+        }
+
         // Hero Agent VIP Header
         item {
             Card(
@@ -403,6 +426,7 @@ fun AgenciesScreen(
 
                     Button(
                         onClick = { showInviteDialog = true },
+                        enabled = featureFlags.agenciesEnabled,
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(48.dp)
@@ -413,7 +437,7 @@ fun AgenciesScreen(
                         Icon(imageVector = Icons.Default.PersonAdd, contentDescription = null, tint = Color.White)
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = "إضافة ودعوة وكيل جديد لشبكتك",
+                            text = if (featureFlags.agenciesEnabled) "إضافة ودعوة وكيل جديد لشبكتك" else "دعوة الوكلاء متوقفة مؤقتاً",
                             fontSize = 14.sp,
                             fontWeight = FontWeight.Bold,
                             color = Color.White
@@ -636,6 +660,7 @@ fun AgenciesScreen(
                         Spacer(modifier = Modifier.height(12.dp))
                         Button(
                             onClick = { showBankPayoutModal = true },
+                            enabled = featureFlags.payoutsEnabled,
                             colors = ButtonDefaults.buttonColors(containerColor = AyerGold),
                             shape = RoundedCornerShape(14.dp),
                             modifier = Modifier
@@ -644,7 +669,11 @@ fun AgenciesScreen(
                         ) {
                             Icon(imageVector = Icons.Default.AccountBalance, contentDescription = null, tint = Color.Black)
                             Spacer(modifier = Modifier.width(6.dp))
-                            Text(text = "تقديم طلب سحب بنكي للمراجعة", color = Color.Black, fontWeight = FontWeight.Bold)
+                            Text(
+                                text = if (featureFlags.payoutsEnabled) "تقديم طلب سحب بنكي للمراجعة" else "طلبات السحب متوقفة مؤقتاً",
+                                color = Color.Black,
+                                fontWeight = FontWeight.Bold
+                            )
                         }
                     }
                 }

@@ -88,14 +88,12 @@ fun IncomingCallOverlay(
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
-                                Image(
-                                    painter = painterResource(id = current.callerAvatarRes ?: R.drawable.img_live_model_1),
-                                    contentDescription = current.callerName,
-                                    contentScale = ContentScale.Crop,
-                                    modifier = Modifier
-                                        .size(54.dp)
-                                        .clip(CircleShape)
-                                        .border(2.dp, AyerGold, CircleShape)
+                                UserInitialAvatar(
+                                    name = current.callerName,
+                                    avatarResId = current.callerAvatarRes,
+                                    size = 54.dp,
+                                    borderWidth = 2.dp,
+                                    borderColor = AyerGold
                                 )
                                 Spacer(modifier = Modifier.width(12.dp))
                                 Column {

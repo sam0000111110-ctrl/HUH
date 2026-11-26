@@ -88,11 +88,9 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.R
 import com.example.data.model.UserProfile
 import com.example.ui.components.AyerSearchBar
-import com.example.ui.components.CreateSecondaryProfileDialog
 import com.example.ui.components.InAppNotificationBanner
 import com.example.ui.components.MinimalCallOverlay
 import com.example.ui.components.NotificationCenterDialog
-import com.example.ui.components.SecondaryProfileIndicatorBar
 import com.example.ui.components.UserProfileTopCornerWidget
 import com.example.ui.components.IncomingCallOverlay
 import com.example.ui.locale.AppLanguage
@@ -129,7 +127,6 @@ sealed class AyerScreen(val route: String, val titleKey: String, val defaultTitl
 fun MainScreen(viewModel: AyerViewModel) {
     var currentScreen by remember { mutableStateOf<AyerScreen>(AyerScreen.Match) }
     var showNotificationCenterDialog by remember { mutableStateOf(false) }
-    var showCreateSecondaryProfileDialog by remember { mutableStateOf(false) }
     var showFriendsDialog by remember { mutableStateOf(false) }
     var showCallAdminDashboard by remember { mutableStateOf(false) }
     var selectedChatFriend by remember { mutableStateOf<com.example.data.model.FriendItem?>(null) }
@@ -157,7 +154,6 @@ fun MainScreen(viewModel: AyerViewModel) {
 
     val activeCallSession by viewModel.activeCallSession.collectAsStateWithLifecycle()
     val incomingCallInvite by viewModel.incomingCallInvite.collectAsStateWithLifecycle()
-    val activeSecondaryProfile by viewModel.activeSecondaryProfile.collectAsStateWithLifecycle()
     val isUserLoggedIn by viewModel.isUserLoggedIn.collectAsStateWithLifecycle()
     val appLanguage by viewModel.appLanguage.collectAsStateWithLifecycle()
     val showRateUsDialog by viewModel.showRateUsDialog.collectAsStateWithLifecycle()
@@ -292,7 +288,7 @@ fun MainScreen(viewModel: AyerViewModel) {
         snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
         topBar = {
             AnimatedVisibility(
-                visible = activeSecondaryProfile != null || !isFullBleedActive,
+                visible = !isFullBleedActive,
                 enter = slideInVertically(
                     initialOffsetY = { -it },
                     animationSpec = spring(
@@ -305,26 +301,19 @@ fun MainScreen(viewModel: AyerViewModel) {
                     animationSpec = tween(180, easing = FastOutLinearInEasing)
                 ) + fadeOut(animationSpec = tween(160))
             ) {
-                if (activeSecondaryProfile != null) {
-                    SecondaryProfileIndicatorBar(
-                        profile = activeSecondaryProfile!!,
-                        onLock = { viewModel.lockSecondaryProfile() },
-                        onToggleNotifications = { enabled -> viewModel.toggleSecondaryProfileNotification(activeSecondaryProfile!!.id, enabled) },
-                        onDeleteProfile = { viewModel.deleteSecondaryProfile(activeSecondaryProfile!!.id) }
-                    )
-                } else {
-                    MainScreenTopBar(
-                        userProfile = userProfile ?: UserProfile(),
-                        onNavigateToProfile = { currentScreen = AyerScreen.Profile },
-                        onOpenFriends = { showFriendsDialog = true },
-                        searchQuery = searchQuery,
-                        onQueryChange = { searchQuery = it },
-                        onSearchSubmitted = {
-                            viewModel.checkSearchUnlock(it)
-                            searchQuery = "" // Reset on submit
+                MainScreenTopBar(
+                    userProfile = userProfile ?: UserProfile(),
+                    onNavigateToProfile = { currentScreen = AyerScreen.Profile },
+                    onOpenFriends = { showFriendsDialog = true },
+                    searchQuery = searchQuery,
+                    onQueryChange = { searchQuery = it },
+                    onSearchSubmitted = { queryText ->
+                        if (queryText.isNotBlank()) {
+                            currentScreen = AyerScreen.Live
                         }
-                    )
-                }
+                        searchQuery = ""
+                    }
+                )
             }
         },
         bottomBar = {
@@ -529,7 +518,6 @@ fun MainScreen(viewModel: AyerViewModel) {
                             userProfile = profile,
                             onNavigateToStore = { currentScreen = AyerScreen.Wallet },
                             onOpenNotificationCenter = { showNotificationCenterDialog = true },
-                            onOpenCreateSecondaryProfileDialog = { showCreateSecondaryProfileDialog = true },
                             onOpenAgenciesScreen = { currentScreen = AyerScreen.Agency }
                         )
                     }
@@ -556,29 +544,6 @@ fun MainScreen(viewModel: AyerViewModel) {
                 invite = incomingCallInvite,
                 onAccept = { viewModel.acceptIncomingCall(it) },
                 onReject = { viewModel.rejectIncomingCall(it) }
-            )
-        }
-
-        // Create Secondary Profile Modal
-        if (showCreateSecondaryProfileDialog) {
-            CreateSecondaryProfileDialog(
-                onDismiss = { showCreateSecondaryProfileDialog = false },
-                onCreateProfile = { username, password, displayName, bio, allowNotifs, avatarResId ->
-                    viewModel.createSecondaryProfile(
-                        username = username,
-                        password = password,
-                        displayName = displayName,
-                        bio = bio,
-                        notificationsEnabled = allowNotifs,
-                        avatarResId = avatarResId,
-                        onComplete = { success, _ ->
-                            if (success) {
-                                showCreateSecondaryProfileDialog = false
-                                viewModel.checkSearchUnlock(password) // Auto-login after creation
-                            }
-                        }
-                    )
-                }
             )
         }
 
@@ -691,7 +656,7 @@ fun MainScreenTopBar(
                         ) {
                             Icon(
                                 imageVector = Icons.Default.Search,
-                                contentDescription = "بحث / رمز سري",
+                                contentDescription = "بحث في البثوث",
                                 tint = HuhTheme.colors.gold,
                                 modifier = Modifier.size(17.dp)
                             )

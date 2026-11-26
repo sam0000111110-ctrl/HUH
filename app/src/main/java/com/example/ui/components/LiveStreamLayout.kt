@@ -126,7 +126,7 @@ data class FloatingHeart(
 fun LiveStreamBasicLayout(
     modifier: Modifier = Modifier,
     // Video Container Parameters
-    videoImageRes: Int? = R.drawable.stream_hero_bg,
+    videoImageRes: Int? = null,
     streamTitle: String = "بث مباشر تعارف وتواصل 🌟",
     isLive: Boolean = true,
     streamResolutionText: String = "1080p 60fps HD",
@@ -177,6 +177,7 @@ fun LiveStreamBasicLayout(
         // 1. Video Display Container (fills entire background viewport)
         VideoDisplayContainer(
             imageRes = videoImageRes,
+            hostName = hostName,
             isLive = currentIsStreaming,
             qualityLabel = streamResolutionText,
             onDoubleTap = { triggerFloatingHeart() },
@@ -445,7 +446,8 @@ fun StreamControlButton(
 @Composable
 fun VideoDisplayContainer(
     modifier: Modifier = Modifier,
-    imageRes: Int? = R.drawable.stream_hero_bg,
+    imageRes: Int? = null,
+    hostName: String = "HUH",
     isLive: Boolean = true,
     qualityLabel: String = "1080p 60fps HD",
     onDoubleTap: (() -> Unit)? = null
@@ -462,11 +464,10 @@ fun VideoDisplayContainer(
                 )
             }
     ) {
-        // Video Stream Background (Image or active surface)
-        Image(
-            painter = painterResource(id = imageRes ?: R.drawable.stream_hero_bg),
-            contentDescription = "عرض البث المباشر (Video Feed)",
-            contentScale = ContentScale.Crop,
+        // Video Stream Background (Authentic image or clean M3 ambient surface)
+        StreamRoomAmbientBackdrop(
+            hostName = hostName,
+            imageResId = imageRes,
             modifier = Modifier.fillMaxSize()
         )
 

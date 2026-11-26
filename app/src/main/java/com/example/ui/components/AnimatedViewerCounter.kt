@@ -226,53 +226,34 @@ fun RollingNumberText(
 }
 
 /**
- * Complete Real-Time Animated Viewer Badge with simulated organic engagement fluctuations,
- * smooth rolling numbers, and engagement delta notifications (+N badge on join).
+ * Real-time Viewer Badge reflecting authoritative server viewer count changes.
  */
 @Composable
 fun AnimatedViewerCountBadge(
     baseCount: Int,
     modifier: Modifier = Modifier,
-    enableLiveFluctuation: Boolean = true,
+    @Suppress("UNUSED_PARAMETER") enableLiveFluctuation: Boolean = false,
     fontSize: TextUnit = 9.sp,
     iconSize: Dp = 11.dp,
     showDeltaPopup: Boolean = true,
     useCountUpText: Boolean = true
 ) {
-    var currentCount by remember(baseCount) { mutableIntStateOf(baseCount) }
+    var previousBaseCount by remember { mutableIntStateOf(baseCount) }
     var lastDelta by remember { mutableIntStateOf(0) }
     var showDeltaAnimation by remember { mutableStateOf(false) }
 
-    // Organic real-time incremental viewer simulation
-    LaunchedEffect(baseCount, enableLiveFluctuation) {
-        if (!enableLiveFluctuation || baseCount <= 0) return@LaunchedEffect
-
-        while (true) {
-            // Wait random interval between 2.2s and 5.5s
-            val nextDelay = Random.nextLong(2200L, 5500L)
-            delay(nextDelay)
-
-            // Organic change: 75% chance of gain (+1 to +5), 25% chance of slight dip (-1 or -2)
-            val roll = Random.nextFloat()
-            val delta = when {
-                roll < 0.40f -> Random.nextInt(1, 3)    // +1 or +2
-                roll < 0.70f -> Random.nextInt(2, 5)    // +2 to +4
-                roll < 0.85f -> 1                       // +1
-                else -> -Random.nextInt(1, 2)           // -1
-            }
-
-            val newCount = (currentCount + delta).coerceAtLeast(1)
-            if (newCount != currentCount) {
-                lastDelta = newCount - currentCount
-                currentCount = newCount
-                if (showDeltaPopup && lastDelta > 0) {
-                    showDeltaAnimation = true
-                    delay(1200L)
-                    showDeltaAnimation = false
-                }
-            }
+    LaunchedEffect(baseCount) {
+        val diff = baseCount - previousBaseCount
+        if (diff > 0 && showDeltaPopup) {
+            lastDelta = diff
+            showDeltaAnimation = true
+            delay(1200L)
+            showDeltaAnimation = false
         }
+        previousBaseCount = baseCount
     }
+
+    val currentCount = baseCount.coerceAtLeast(0)
 
     val badgeScale by animateFloatAsState(
         targetValue = if (showDeltaAnimation) 1.08f else 1.0f,

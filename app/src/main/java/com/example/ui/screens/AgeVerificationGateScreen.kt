@@ -66,9 +66,12 @@ fun AgeVerificationGateScreen(
     onSignOut: () -> Unit
 ) {
     val effectiveStatus = when {
-        userProfile?.ageVerified == true || ageSubmission?.status == "APPROVED" -> "APPROVED"
+        userProfile?.ageVerified == true ||
+            ageSubmission?.status in listOf("APPROVED", "VERIFIED") ||
+            userProfile?.ageVerificationStatus in listOf("APPROVED", "VERIFIED") -> "APPROVED"
         ageSubmission?.status == "PENDING_REVIEW" || userProfile?.ageVerificationStatus == "PENDING_REVIEW" -> "PENDING_REVIEW"
-        ageSubmission?.status == "REJECTED" || userProfile?.ageVerificationStatus == "REJECTED" -> "REJECTED"
+        ageSubmission?.status in listOf("REJECTED", "REJECTED_UNDERAGE") ||
+            userProfile?.ageVerificationStatus in listOf("REJECTED", "REJECTED_UNDERAGE") -> "REJECTED"
         else -> "UNVERIFIED"
     }
 

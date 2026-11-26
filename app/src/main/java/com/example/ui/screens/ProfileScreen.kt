@@ -99,7 +99,6 @@ fun ProfileScreen(
     viewModel: AyerViewModel,
     userProfile: UserProfile,
     onOpenNotificationCenter: () -> Unit = {},
-    onOpenCreateSecondaryProfileDialog: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     var autoTranslate by remember { mutableStateOf(true) }
@@ -109,7 +108,7 @@ fun ProfileScreen(
     val appLanguage by viewModel.appLanguage.collectAsStateWithLifecycle()
     var showLanguageBottomSheet by remember { mutableStateOf(false) }
     val unreadNotificationCount by viewModel.unreadNotificationCount.collectAsStateWithLifecycle()
-    val activeSecondaryProfile by viewModel.activeSecondaryProfile.collectAsStateWithLifecycle()
+    val featureFlags by viewModel.featureFlags.collectAsStateWithLifecycle()
     val engagementState by viewModel.engagementState.collectAsStateWithLifecycle()
     val dailyMissions by viewModel.dailyMissions.collectAsStateWithLifecycle()
 
@@ -405,7 +404,7 @@ fun ProfileScreen(
                     // Claim Daily Engagement Bonus Button
                     Button(
                         onClick = { viewModel.claimEngagementReward() },
-                        enabled = engagementState.todayEngagementPoints >= 100 && !engagementState.dailyMilestoneClaimed,
+                        enabled = featureFlags.missionRewardsEnabled && engagementState.todayEngagementPoints >= 100 && !engagementState.dailyMilestoneClaimed,
                         colors = ButtonDefaults.buttonColors(
                             containerColor = Color(0xFF10B981),
                             disabledContainerColor = HuhTheme.colors.surfaceVariant
@@ -418,17 +417,18 @@ fun ProfileScreen(
                         Icon(
                             imageVector = Icons.Default.EmojiEvents,
                             contentDescription = null,
-                            tint = if (engagementState.todayEngagementPoints >= 100 && !engagementState.dailyMilestoneClaimed) Color.White else HuhTheme.colors.textTertiary,
+                            tint = if (featureFlags.missionRewardsEnabled && engagementState.todayEngagementPoints >= 100 && !engagementState.dailyMilestoneClaimed) Color.White else HuhTheme.colors.textTertiary,
                             modifier = Modifier.size(16.dp)
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = if (engagementState.dailyMilestoneClaimed) "تم استلام مكافأة التفاعل اليومية ✅"
+                            text = if (!featureFlags.missionRewardsEnabled) "مكافآت المهام متوقفة مؤقتاً أثناء المراجعة"
+                            else if (engagementState.dailyMilestoneClaimed) "تم استلام مكافأة التفاعل اليومية ✅"
                             else if (engagementState.todayEngagementPoints >= 100) "استلم مكافأة التفاعل اليومي (+50 نقطة) 🎁"
                             else "أكمل 100 نقطة تفاعل لفتح المكافأة (+50)",
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Bold,
-                            color = if (engagementState.todayEngagementPoints >= 100 && !engagementState.dailyMilestoneClaimed) Color.White else HuhTheme.colors.textTertiary
+                            color = if (featureFlags.missionRewardsEnabled && engagementState.todayEngagementPoints >= 100 && !engagementState.dailyMilestoneClaimed) Color.White else HuhTheme.colors.textTertiary
                         )
                     }
 
@@ -495,6 +495,7 @@ fun ProfileScreen(
         item {
             DailyMissionsCard(
                 missions = dailyMissions,
+                missionRewardsEnabled = featureFlags.missionRewardsEnabled,
                 onClaimReward = { missionId ->
                     viewModel.claimDailyMissionReward(missionId)
                 }
@@ -1038,138 +1039,6 @@ fun ProfileScreen(
                             }
                             Icon(imageVector = Icons.AutoMirrored.Filled.ArrowForwardIos, contentDescription = null, tint = HuhTheme.colors.textTertiary, modifier = Modifier.size(14.dp))
                         }
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(16.dp))
-        }
-
-        // Section: Hidden Secondary Profile (البروفايل الثانوي المخفي برمز سري)
-        item {
-            Text(
-                text = "الخصوصية المتقدمة (البروفايل الثانوي المخفي)",
-                fontSize = 15.sp,
-                fontWeight = FontWeight.Bold,
-                color = HuhTheme.colors.textPrimary
-            )
-            Spacer(modifier = Modifier.height(10.dp))
-        }
-
-        item {
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(containerColor = HuhTheme.colors.surfaceElevated),
-                shape = RoundedCornerShape(16.dp),
-                border = BorderStroke(1.dp, HuhTheme.colors.gold.copy(alpha = 0.35f))
-            ) {
-                Column(modifier = Modifier.padding(14.dp)) {
-                    val activeSec = activeSecondaryProfile
-                    if (activeSec != null) {
-                        // Currently in secondary profile
-                        Surface(
-                            color = HuhTheme.colors.primaryContainer,
-                            shape = RoundedCornerShape(12.dp),
-                            border = BorderStroke(1.dp, HuhTheme.colors.gold)
-                        ) {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(12.dp),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    val avRes = activeSec.avatarResId ?: R.drawable.img_live_model_3
-                                    Image(
-                                        painter = painterResource(id = avRes),
-                                        contentDescription = null,
-                                        modifier = Modifier
-                                            .size(40.dp)
-                                            .clip(CircleShape)
-                                            .border(1.5.dp, HuhTheme.colors.gold, CircleShape),
-                                        contentScale = ContentScale.Crop
-                                    )
-                                    Spacer(modifier = Modifier.width(10.dp))
-                                    Column {
-                                        Text(
-                                            text = "🎭 أنت الآن داخل: ${activeSec.displayName}",
-                                            fontSize = 13.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            color = HuhTheme.colors.gold
-                                        )
-                                        Text(
-                                            text = "@${activeSec.username} • محمي برمز سري",
-                                            fontSize = 11.sp,
-                                            color = HuhTheme.colors.textSecondary
-                                        )
-                                    }
-                                }
-
-                                Button(
-                                    onClick = { viewModel.lockSecondaryProfile() },
-                                    colors = ButtonDefaults.buttonColors(containerColor = HuhTheme.colors.error),
-                                    shape = RoundedCornerShape(14.dp),
-                                    modifier = Modifier.height(34.dp)
-                                ) {
-                                    Icon(imageVector = Icons.Default.Lock, contentDescription = null, modifier = Modifier.size(14.dp))
-                                    Spacer(modifier = Modifier.width(4.dp))
-                                    Text("قفل فوري", fontSize = 11.sp, color = Color.White)
-                                }
-                            }
-                        }
-                    } else {
-                        // Not in secondary profile -> Option to create or unlock
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable(onClick = onOpenCreateSecondaryProfileDialog)
-                                .testTag("open_create_secondary_profile_button"),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                modifier = Modifier.weight(1f)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Lock,
-                                    contentDescription = null,
-                                    tint = HuhTheme.colors.gold,
-                                    modifier = Modifier.size(24.dp)
-                                )
-                                Spacer(modifier = Modifier.width(10.dp))
-                                Column {
-                                    Text(
-                                        text = "إنشاء بروفايل ثانوي مخفي (Hidden Vault)",
-                                        fontSize = 13.sp,
-                                        fontWeight = FontWeight.SemiBold,
-                                        color = HuhTheme.colors.textPrimary
-                                    )
-                                    Text(
-                                        text = "هوية مستقلة محميّة برمز سري؛ لا تظهر في أي قائمة وتُفتح بالبحث",
-                                        fontSize = 11.sp,
-                                        color = HuhTheme.colors.textSecondary
-                                    )
-                                }
-                            }
-                            Icon(
-                                imageVector = Icons.AutoMirrored.Filled.ArrowForwardIos,
-                                contentDescription = null,
-                                tint = HuhTheme.colors.gold,
-                                modifier = Modifier.size(14.dp)
-                            )
-                        }
-
-                        HorizontalDivider(modifier = Modifier.padding(vertical = 10.dp), color = HuhTheme.colors.surfaceVariant)
-
-                        // Explanation
-                        Text(
-                            text = "💡 طريقة الدخول للبروفايل المخفي: اكتب الرمز السري الخاص بالبروفايل في أي وقت في شريط البحث الرئيسي للتطبيق وسيتم نقلك للبروفايل السري مباشرة وبشكل صامت دون ترك أي أثر.",
-                            fontSize = 11.sp,
-                            color = HuhTheme.colors.textSecondary,
-                            lineHeight = 16.sp
-                        )
                     }
                 }
             }

@@ -1,4 +1,5 @@
 import com.google.gms.googleservices.GoogleServicesPlugin.MissingGoogleServicesStrategy
+import java.util.Properties
 
 plugins {
   alias(libs.plugins.android.application)
@@ -20,7 +21,11 @@ android {
     versionCode = 1
     versionName = "1.0"
 
-    val backendUrl = (System.getenv("CALL_BACKEND_URL") ?: "").replace("\"", "\\\"")
+    val envProps = Properties().apply {
+      val envFile = rootProject.file(".env")
+      if (envFile.exists()) envFile.inputStream().use { load(it) }
+    }
+    val backendUrl = (System.getenv("CALL_BACKEND_URL") ?: envProps.getProperty("CALL_BACKEND_URL") ?: "").replace("\"", "\\\"")
     buildConfigField("String", "CALL_BACKEND_URL", "\"$backendUrl\"")
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -143,6 +148,7 @@ dependencies {
   implementation(libs.okhttp)
   // implementation(libs.play.services.location)
   implementation(libs.retrofit)
+  implementation(libs.zxing.core)
   testImplementation(libs.androidx.compose.ui.test.junit4)
   testImplementation(libs.androidx.core)
   testImplementation(libs.androidx.junit)
@@ -152,11 +158,11 @@ dependencies {
   testImplementation(libs.roborazzi)
   testImplementation(libs.roborazzi.compose)
   testImplementation(libs.roborazzi.junit.rule)
-  androidTestImplementation(platform(libs.androidx.compose.bom))
-  androidTestImplementation(libs.androidx.compose.ui.test.junit4)
-  androidTestImplementation(libs.androidx.espresso.core)
-  androidTestImplementation(libs.androidx.junit)
-  androidTestImplementation(libs.androidx.runner)
+  // androidTestImplementation(platform(libs.androidx.compose.bom))
+  // androidTestImplementation(libs.androidx.compose.ui.test.junit4)
+  // androidTestImplementation(libs.androidx.espresso.core)
+  // androidTestImplementation(libs.androidx.junit)
+  // androidTestImplementation(libs.androidx.runner)
   debugImplementation(libs.androidx.compose.ui.test.manifest)
   debugImplementation(libs.androidx.compose.ui.tooling)
   "ksp"(libs.androidx.room.compiler)
