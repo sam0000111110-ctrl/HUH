@@ -101,13 +101,15 @@ async function getGooglePlayAccessToken(env, fetchImpl = globalThis.fetch) {
 }
 
 /**
- * Verifies a Google Play consumable purchase via Google Play Developer API v3
- * and acknowledges/consumes it on the server.
+ * Verifies a Google Play consumable purchase via Google Play Developer API v3.
+ * Decoupled from consumption: verifies purchase status and obfuscated account id,
+ * allowing ledger crediting to happen before consumption.
  */
 export async function verifyGooglePlayProductPurchase({
   packageName,
   productId,
   purchaseToken,
+  expectedObfuscatedAccountId = null,
   env = process.env,
   fetchImpl = globalThis.fetch,
   customVerifier = null
@@ -127,8 +129,29 @@ export async function verifyGooglePlayProductPurchase({
   }
 
   if (customVerifier) {
-    const verified = await customVerifier({ packageName, productId: catalogEntry.productId, purchaseToken });
-    return { catalogEntry, ...verified };
+    const verified = await customVerifier({
+      packageName,
+      productId: catalogEntry.productId,
+      purchaseToken,
+      expectedObfuscatedAccountId
+    });
+    if (expectedObfuscatedAccountId) {
+      const actualId = verified.obfuscatedExternalAccountId || null;
+      if (!actualId && env.ALLOW_MISSING_OBFUSCATED_ACCOUNT_ID !== 'true') {
+        throw new CallEngineError('FORBIDDEN_PURCHASE_ACCOUNT_MISSING', 'معرف الحساب المشفر مفقود في إيصال الشراء', 403);
+      }
+      if (actualId && actualId !== expectedObfuscatedAccountId) {
+        throw new CallEngineError('FORBIDDEN_PURCHASE_ACCOUNT_MISMATCH', 'معرف الحساب المشفر لا يطابق المستخدم الموثق', 403);
+      }
+    }
+    return {
+      catalogEntry,
+      orderId: verified.orderId || null,
+      purchaseState: verified.purchaseState ?? 0,
+      acknowledged: verified.acknowledged ?? false,
+      obfuscatedExternalAccountId: verified.obfuscatedExternalAccountId || null,
+      verificationSource: verified.verificationSource || 'custom_verifier'
+    };
   }
 
   const accessToken = await getGooglePlayAccessToken(env, fetchImpl);
@@ -157,8 +180,60 @@ export async function verifyGooglePlayProductPurchase({
     throw new CallEngineError('PLAY_PURCHASE_ALREADY_CONSUMED', 'تم استهلاك عملية الشراء هذه مسبقاً', 409);
   }
 
-  let acknowledged = purchase.acknowledgementState === 1;
-  if (!acknowledged) {
+  if (expectedObfuscatedAccountId) {
+    const actualId = purchase.obfuscatedExternalAccountId || null;
+    if (!actualId && env.ALLOW_MISSING_OBFUSCATED_ACCOUNT_ID !== 'true') {
+      throw new CallEngineError('FORBIDDEN_PURCHASE_ACCOUNT_MISSING', 'معرف الحساب المشفر مفقود في إيصال Google Play', 403);
+    }
+    if (actualId && actualId !== expectedObfuscatedAccountId) {
+      throw new CallEngineError('FORBIDDEN_PURCHASE_ACCOUNT_MISMATCH', 'معرف الحساب المشفر لا يطابق المستخدم الموثق', 403);
+    }
+  }
+
+  const acknowledged = purchase.acknowledgementState === 1;
+
+  return {
+    catalogEntry,
+    orderId: purchase.orderId || null,
+    purchaseState: purchase.purchaseState,
+    acknowledged,
+    obfuscatedExternalAccountId: purchase.obfuscatedExternalAccountId || null,
+    verificationSource: 'google_play_androidpublisher_v3'
+  };
+}
+
+/**
+ * Acknowledges and consumes a verified purchase on Google Play Developer API v3.
+ * Called strictly AFTER atomic crediting in the server ledger.
+ */
+export async function acknowledgeAndConsumeGooglePlayPurchase({
+  packageName,
+  productId,
+  purchaseToken,
+  env = process.env,
+  fetchImpl = globalThis.fetch,
+  customConsumer = null
+}) {
+  if (!packageName || !productId || !purchaseToken) {
+    return { acknowledged: false, consumed: false };
+  }
+
+  if (customConsumer) {
+    return await customConsumer({ packageName, productId, purchaseToken });
+  }
+
+  const catalogEntry = resolveCatalogPackage(productId);
+  const actualProductId = catalogEntry?.productId || productId;
+
+  const accessToken = await getGooglePlayAccessToken(env, fetchImpl).catch(() => null);
+  if (!accessToken) {
+    return { acknowledged: false, consumed: false, note: 'ACCESS_TOKEN_UNAVAILABLE' };
+  }
+
+  const baseApi = `https://androidpublisher.googleapis.com/androidpublisher/v3/applications/${encodeURIComponent(packageName)}/purchases/products/${encodeURIComponent(actualProductId)}/tokens/${encodeURIComponent(purchaseToken)}`;
+
+  let acknowledged = false;
+  try {
     const ackRes = await fetchImpl(`${baseApi}:acknowledge`, {
       method: 'POST',
       headers: {
@@ -168,19 +243,20 @@ export async function verifyGooglePlayProductPurchase({
       body: JSON.stringify({ developerPayload: 'ayer_verified' })
     });
     acknowledged = ackRes.ok;
+  } catch {
+    // Non-fatal: ledger already credited
   }
 
-  // Consume product on Play Developer API so repeatable coin packs can be repurchased safely
-  await fetchImpl(`${baseApi}:consume`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${accessToken}` }
-  }).catch(() => {});
+  let consumed = false;
+  try {
+    const conRes = await fetchImpl(`${baseApi}:consume`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${accessToken}` }
+    });
+    consumed = conRes.ok;
+  } catch {
+    // Non-fatal: user has coins, subsequent retries are idempotent
+  }
 
-  return {
-    catalogEntry,
-    orderId: purchase.orderId || null,
-    purchaseState: purchase.purchaseState,
-    acknowledged,
-    verificationSource: 'google_play_androidpublisher_v3'
-  };
+  return { acknowledged, consumed };
 }

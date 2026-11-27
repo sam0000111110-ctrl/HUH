@@ -1058,8 +1058,9 @@ class AyerViewModel(application: Application) : AndroidViewModel(application) {
             _uiNotice.value = "تعذر فتح Google Play Billing: الشاشة غير نشطة."
             return
         }
+        val currentUid: String? = auth?.currentUser?.uid ?: userProfile.value?.uid?.takeIf { it.isNotBlank() }
         playBillingManager.startConnection()
-        playBillingManager.launchPurchaseFlow(activity, coinPackage.productId)
+        playBillingManager.launchPurchaseFlow(activity, coinPackage.productId, currentUid)
     }
 
     fun refreshAgencyDashboard() {

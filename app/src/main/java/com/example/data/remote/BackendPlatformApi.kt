@@ -52,6 +52,7 @@ data class BackendUserDto(
 data class BackendWalletDto(
     val uid: String = "",
     val pointsBalance: Int = 0,
+    val debtCoins: Int = 0,
     val hostEarningsCoins: Int = 0,
     val subAgentsEarningsCoins: Int = 0,
     val reservedPayoutCoins: Int = 0,
@@ -171,7 +172,10 @@ data class VerifyPlayPurchaseRequestDto(
 @JsonClass(generateAdapter = true)
 data class VerifyPlayPurchaseResponseDto(
     val wallet: BackendWalletDto,
-    val creditedCoins: Int = 0
+    val creditedCoins: Int = 0,
+    val debtSettled: Int = 0,
+    val alreadyCredited: Boolean = false,
+    val duplicate: Boolean = false
 )
 
 @Keep

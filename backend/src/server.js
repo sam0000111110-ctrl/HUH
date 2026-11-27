@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -5,7 +6,7 @@ import { AuthoritativeCallEngine, CallEngineError } from './callEngine.js';
 import { LiveKitRoomClient, verifyHs256Jwt } from './livekitJwt.js';
 import { authenticateRequest } from './authMiddleware.js';
 import { createLedgerStore, MemoryLedgerStore } from './ledgerStore.js';
-import { verifyGooglePlayProductPurchase } from './playBillingVerifier.js';
+import { verifyGooglePlayProductPurchase, acknowledgeAndConsumeGooglePlayPurchase } from './playBillingVerifier.js';
 import { RealtimeBroadcastAndMatchEngine, calculateMatchCost } from './realtimeEngine.js';
 
 function readJsonBody(req, maxBytes = 65_536) {
@@ -100,6 +101,7 @@ export function createCallServer({
   ledger = null,
   tokenVerifier = null,
   playBillingVerifier = null,
+  playBillingConsumer = null,
   fetchImpl = globalThis.fetch
 } = {}) {
   const livekitUrl = env.LIVEKIT_URL || '';
@@ -191,6 +193,58 @@ export function createCallServer({
           await realtimeEngine.handleLiveKitWebhook({ eventName, roomName, participantIdentity });
         }
         return sendJson(res, 200, { received: true });
+      }
+
+      // Google Play Real-Time Developer Notifications (RTDN) Webhook
+      if (method === 'POST' && pathname === '/api/billing/webhook/play-rtdn') {
+        const secret = env.PLAY_RTDN_SECRET;
+        if (env.NODE_ENV === 'production' && !secret) {
+          return sendJson(res, 503, { error: 'RTDN_NOT_CONFIGURED', message: 'رمز أمان RTDN غير مهيأ على خادم الإنتاج' });
+        }
+        if (secret && req.headers['x-rtdn-secret'] !== secret && parsedUrl.searchParams.get('secret') !== secret) {
+          return sendJson(res, 401, { error: 'UNAUTHORIZED_RTDN', message: 'رمز أمان RTDN غير صالح' });
+        }
+        const body = await readJsonBody(req);
+        let rtdnData = body;
+        if (body?.message?.data) {
+          try {
+            const raw = Buffer.from(body.message.data, 'base64').toString('utf8');
+            rtdnData = JSON.parse(raw);
+          } catch {
+            // keep as-is
+          }
+        }
+        const activeLedger = await getLedger();
+        let targetPurchaseToken = null;
+        let voidReason = null;
+
+        if (rtdnData.voidedPurchaseNotification?.purchaseToken) {
+          targetPurchaseToken = rtdnData.voidedPurchaseNotification.purchaseToken;
+          voidReason = `RTDN_VOIDED_REFUND_TYPE_${rtdnData.voidedPurchaseNotification.refundType || 1}`;
+        } else if (rtdnData.oneTimeProductNotification) {
+          const { notificationType, purchaseToken } = rtdnData.oneTimeProductNotification;
+          // notificationType: 2 = ONE_TIME_PRODUCT_CANCELED, 12 = ONE_TIME_PRODUCT_REVOKED
+          if ((notificationType === 2 || notificationType === 12) && purchaseToken) {
+            targetPurchaseToken = purchaseToken;
+            voidReason = notificationType === 2 ? 'RTDN_ONE_TIME_PRODUCT_CANCELED' : 'RTDN_ONE_TIME_PRODUCT_REVOKED';
+          }
+        }
+
+        if (targetPurchaseToken) {
+          try {
+            const clawback = await activeLedger.processVoidedPurchase({
+              purchaseToken: targetPurchaseToken,
+              reason: voidReason
+            });
+            return sendJson(res, 200, { ok: true, clawback });
+          } catch (err) {
+            if (err?.code === 'IAP_NOT_FOUND') {
+              return sendJson(res, 200, { ok: true, ignored: true, reason: 'PURCHASE_NOT_CREDITED' });
+            }
+            throw err;
+          }
+        }
+        return sendJson(res, 200, { ok: true, received: true });
       }
 
       // Authenticate caller/admin
@@ -285,14 +339,54 @@ export function createCallServer({
 
       if (method === 'POST' && pathname === '/api/billing/verify-play-purchase') {
         const body = await readJsonBody(req);
+        if (!body.purchaseToken) {
+          throw new CallEngineError('MISSING_PURCHASE_TOKEN', 'رمز شراء Google Play مطلوب', 400);
+        }
+
+        // 1. Idempotency check: If purchaseToken was already credited, return idempotent success
+        const existingTx = await activeLedger.getIapTransaction(body.purchaseToken);
+        if (existingTx) {
+          if (existingTx.uid === user.uid) {
+            if (!existingTx.acknowledged) {
+              const ackRetry = await acknowledgeAndConsumeGooglePlayPurchase({
+                packageName: body.packageName || env.ANDROID_PACKAGE_NAME || 'com.aistudio.ayer.live',
+                productId: existingTx.productId,
+                purchaseToken: body.purchaseToken,
+                env,
+                fetchImpl,
+                customConsumer: playBillingConsumer
+              }).catch(() => ({ acknowledged: false }));
+              if (ackRetry?.acknowledged) {
+                await activeLedger.markIapAcknowledged(body.purchaseToken).catch(() => {});
+              }
+            }
+            const { wallet } = await activeLedger.ensureUser({ uid: user.uid });
+            return sendJson(res, 200, {
+              wallet,
+              creditedCoins: existingTx.coinsCredited,
+              alreadyCredited: true,
+              duplicate: true
+            });
+          } else {
+            throw new CallEngineError('DUPLICATE_PURCHASE_TOKEN_OTHER_USER', 'رمز الشراء مسجل لحساب مستخدم آخر', 409);
+          }
+        }
+
+        // 2. Compute expected obfuscated external account id = SHA-256(uid) hex (64 chars)
+        const expectedObfuscatedAccountId = crypto.createHash('sha256').update(String(user.uid)).digest('hex');
+
+        // 3. Verify purchase with Google Play Developer API (validates SKU, state, and obfuscatedExternalAccountId)
         const verified = await verifyGooglePlayProductPurchase({
           packageName: body.packageName,
           productId: body.productId,
           purchaseToken: body.purchaseToken,
+          expectedObfuscatedAccountId,
           env,
           fetchImpl,
           customVerifier: playBillingVerifier
         });
+
+        // 4. Atomically credit purchase in server ledger BEFORE consuming on Google Play
         const credited = await activeLedger.creditPlayPurchase({
           uid: user.uid,
           displayName: user.name || '',
@@ -304,9 +398,25 @@ export function createCallServer({
           purchaseToken: body.purchaseToken,
           orderId: verified.orderId || body.orderId || null,
           purchaseState: verified.purchaseState ?? 0,
-          acknowledged: verified.acknowledged ?? true,
+          acknowledged: verified.acknowledged ?? false,
+          obfuscatedExternalAccountId: verified.obfuscatedExternalAccountId || expectedObfuscatedAccountId,
           verificationSource: verified.verificationSource || 'google_play_androidpublisher_v3'
         });
+
+        // 5. Acknowledge & consume on Google Play Developer API strictly AFTER atomic ledger credit
+        const ackResult = await acknowledgeAndConsumeGooglePlayPurchase({
+          packageName: body.packageName,
+          productId: verified.catalogEntry.productId,
+          purchaseToken: body.purchaseToken,
+          env,
+          fetchImpl,
+          customConsumer: playBillingConsumer
+        }).catch(() => ({ acknowledged: false, consumed: false }));
+
+        if (ackResult?.acknowledged && !verified.acknowledged) {
+          await activeLedger.markIapAcknowledged(body.purchaseToken).catch(() => {});
+        }
+
         return sendJson(res, 200, credited);
       }
 
@@ -673,6 +783,18 @@ export function createCallServer({
             agencyName: body.agencyName
           });
           return sendJson(res, 200, { user: updatedUser });
+        }
+
+        if (method === 'POST' && pathname === '/api/admin/billing/process-voided-purchase') {
+          const body = await readJsonBody(req);
+          if (!body.purchaseToken) {
+            throw new CallEngineError('MISSING_PURCHASE_TOKEN', 'رمز الشراء مطلوب', 400);
+          }
+          const result = await activeLedger.processVoidedPurchase({
+            purchaseToken: body.purchaseToken,
+            reason: body.reason || 'ADMIN_MANUAL_VOID'
+          });
+          return sendJson(res, 200, result);
         }
 
         if (method === 'GET' && pathname === '/api/admin/reports') {

@@ -38,6 +38,12 @@ class PlayBillingManager(
             "ayer_coins_3000",
             "ayer_coins_7500"
         )
+
+        fun sha256Hex(input: String): String {
+            val md = java.security.MessageDigest.getInstance("SHA-256")
+            val digest = md.digest(input.toByteArray(Charsets.UTF_8))
+            return digest.joinToString("") { "%02x".format(it) }
+        }
     }
 
     private val _isBillingReady = MutableStateFlow(false)
@@ -132,7 +138,7 @@ class PlayBillingManager(
         }
     }
 
-    fun launchPurchaseFlow(activity: Activity?, productId: String) {
+    fun launchPurchaseFlow(activity: Activity?, productId: String, userUid: String? = null) {
         val client = billingClient
         if (client == null || !client.isReady || activity == null) {
             onBillingError("متجر Google Play غير متاح على هذا الجهاز حالياً. لا يمكن شحن النقاط بدون تحقق رسمي.")
@@ -148,9 +154,14 @@ class PlayBillingManager(
         val productParams = BillingFlowParams.ProductDetailsParams.newBuilder()
             .setProductDetails(details)
             .build()
-        val flowParams = BillingFlowParams.newBuilder()
+        val flowParamsBuilder = BillingFlowParams.newBuilder()
             .setProductDetailsParamsList(listOf(productParams))
-            .build()
+
+        if (!userUid.isNullOrBlank()) {
+            flowParamsBuilder.setObfuscatedAccountId(sha256Hex(userUid))
+        }
+
+        val flowParams = flowParamsBuilder.build()
 
         val result = client.launchBillingFlow(activity, flowParams)
         if (result.responseCode != BillingClient.BillingResponseCode.OK) {

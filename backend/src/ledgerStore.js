@@ -92,6 +92,7 @@ export class MemoryLedgerStore {
       this.wallets.set(safeUid, {
         uid: safeUid,
         pointsBalance: 0,
+        debtCoins: 0,
         hostEarningsCoins: 0,
         subAgentsEarningsCoins: 0,
         reservedPayoutCoins: 0,
@@ -145,6 +146,23 @@ export class MemoryLedgerStore {
     });
   }
 
+  async getIapTransaction(purchaseToken) {
+    return this._withLock(() => {
+      const tx = this.iapTokens.get(purchaseToken);
+      return tx ? { ...tx } : null;
+    });
+  }
+
+  async markIapAcknowledged(purchaseToken) {
+    return this._withLock(() => {
+      const tx = this.iapTokens.get(purchaseToken);
+      if (tx) {
+        tx.acknowledged = true;
+      }
+      return Boolean(tx);
+    });
+  }
+
   async getWalletSummary(uid, limit = 50) {
     return this._withLock(() => {
       const { user, wallet } = this._ensureUserSync({ uid });
@@ -177,6 +195,7 @@ export class MemoryLedgerStore {
     orderId = null,
     purchaseState = 0,
     acknowledged = true,
+    obfuscatedExternalAccountId = null,
     verificationSource = 'google_play_androidpublisher_v3'
   }) {
     return this._withLock(() => {
@@ -184,7 +203,18 @@ export class MemoryLedgerStore {
         throw new CallEngineError('MISSING_PURCHASE_TOKEN', 'رمز شراء Google Play مطلوب', 400);
       }
       if (this.iapTokens.has(purchaseToken)) {
-        throw new CallEngineError('DUPLICATE_PURCHASE_TOKEN', 'تم صرف عملية الشراء هذه مسبقاً', 409);
+        const existing = this.iapTokens.get(purchaseToken);
+        if (existing.uid === uid) {
+          const { wallet } = this._ensureUserSync({ uid });
+          return {
+            wallet: { ...wallet },
+            creditedCoins: existing.coinsCredited,
+            duplicate: true,
+            alreadyCredited: true
+          };
+        } else {
+          throw new CallEngineError('DUPLICATE_PURCHASE_TOKEN_OTHER_USER', 'رمز الشراء مسجل لحساب مستخدم آخر', 409);
+        }
       }
       const coins = Number(coinsCredited);
       if (!Number.isInteger(coins) || coins <= 0) {
@@ -208,37 +238,66 @@ export class MemoryLedgerStore {
         currencyCode: 'USD',
         purchaseState,
         acknowledged,
+        obfuscatedExternalAccountId,
+        isVoided: false,
+        voidedAtMs: null,
+        voidedReason: null,
         verificationSource,
         verifiedAtMs: nowMs
       });
 
-      wallet.pointsBalance += coins;
+      // Settle existing debt first
+      const currentDebt = wallet.debtCoins || 0;
+      const debtSettled = Math.min(currentDebt, coins);
+      const coinsToCredit = coins - debtSettled;
+
+      wallet.debtCoins = currentDebt - debtSettled;
+      wallet.pointsBalance += coinsToCredit;
       wallet.totalAccumulatedPoints += coins;
       wallet.updatedAtMs = nowMs;
+
+      if (debtSettled > 0) {
+        this._appendLedgerSync({
+          uid,
+          entryType: 'PURCHASE_DEBT_SETTLEMENT',
+          bucket: 'DEBT',
+          delta: -debtSettled,
+          balanceAfter: wallet.debtCoins,
+          idempotencyKey: `debt_settle_${purchaseToken}`,
+          referenceId: orderId || purchaseToken,
+          description: `سداد مديونية سابقة من شحن Google Play (-${debtSettled} نقطة دين)`,
+          metadata: { purchaseToken, orderId, debtSettled, remainingDebt: wallet.debtCoins }
+        });
+      }
 
       const entry = this._appendLedgerSync({
         uid,
         entryType: 'PURCHASE',
         bucket: 'POINTS',
-        delta: coins,
+        delta: coinsToCredit,
         balanceAfter: wallet.pointsBalance,
         idempotencyKey: `iap_${purchaseToken}`,
         referenceId: orderId || purchaseToken,
-        description: `شحن Google Play (+${coins} نقطة)`,
-        metadata: { packageId, productId, verificationSource }
+        description: debtSettled > 0
+          ? `شحن Google Play (+${coins} نقطة، سُدد منها ${debtSettled} دين، والمضاف ${coinsToCredit})`
+          : `شحن Google Play (+${coins} نقطة)`,
+        metadata: { packageId, productId, verificationSource, debtSettled }
       });
 
       this._auditSync({
         actorUid: uid,
         action: 'IAP_PURCHASE_CREDITED',
         targetId: packageId,
-        details: { coinsCredited: coins, orderId }
+        details: { coinsCredited: coins, debtSettled, orderId }
       });
 
       return {
         wallet: { ...wallet },
         entry,
-        creditedCoins: coins
+        creditedCoins: coins,
+        debtSettled,
+        duplicate: false,
+        alreadyCredited: false
       };
     });
   }
@@ -259,6 +318,11 @@ export class MemoryLedgerStore {
       const { user, wallet } = this._ensureUserSync({ uid });
       if (user.deletedAt) {
         throw new CallEngineError('ACCOUNT_DELETED', 'هذا الحساب محذوف', 403);
+      }
+      if ((wallet.debtCoins || 0) > 0) {
+        throw new CallEngineError('ACCOUNT_HAS_DEBT', 'لا يمكن استخدام النقاط لوجود مديونية مستردات على الحساب. يرجى سداد المديونية أولاً.', 403, {
+          debtCoins: wallet.debtCoins
+        });
       }
       if (wallet.pointsBalance < spendAmount) {
         throw new CallEngineError('INSUFFICIENT_COINS', 'رصيد النقاط غير كافٍ لإتمام العملية', 402, {
@@ -401,6 +465,12 @@ export class MemoryLedgerStore {
 
       const sender = this._ensureUserSync({ uid: senderUid });
       const recipient = this._ensureUserSync({ uid: recipientUid });
+
+      if ((sender.wallet.debtCoins || 0) > 0) {
+        throw new CallEngineError('ACCOUNT_HAS_DEBT', 'لا يمكن إرسال الهدايا لوجود مديونية مستردات على الحساب.', 403, {
+          debtCoins: sender.wallet.debtCoins
+        });
+      }
 
       if (sender.wallet.pointsBalance < cost) {
         throw new CallEngineError('INSUFFICIENT_COINS', 'رصيد النقاط غير كافٍ لإرسال هذه الهدية', 402);
@@ -562,6 +632,11 @@ export class MemoryLedgerStore {
       }
 
       const { user, wallet } = this._ensureUserSync({ uid });
+      if ((wallet.debtCoins || 0) > 0) {
+        throw new CallEngineError('ACCOUNT_HAS_DEBT', 'لا يمكن طلب سحب الأرباح لوجود مديونية مستردات على الحساب.', 403, {
+          debtCoins: wallet.debtCoins
+        });
+      }
       if (!user.ageVerified) {
         throw new CallEngineError('AGE_VERIFICATION_REQUIRED', 'يجب توثيق العمر (+18) قبل تقديم طلب سحب', 403);
       }
@@ -917,6 +992,111 @@ export class MemoryLedgerStore {
       return { deleted: true, uid };
     });
   }
+
+  async processVoidedPurchase({ purchaseToken, reason = 'PLAY_STORE_REFUND' }) {
+    return this._withLock(() => {
+      const tx = this.iapTokens.get(purchaseToken);
+      if (!tx) {
+        throw new CallEngineError('IAP_NOT_FOUND', 'عملية الشراء غير موجودة', 404);
+      }
+      if (tx.isVoided) {
+        return {
+          duplicate: true,
+          alreadyVoided: true,
+          purchaseToken,
+          uid: tx.uid
+        };
+      }
+      tx.isVoided = true;
+      tx.voidedAtMs = this.now();
+      tx.voidedReason = reason;
+
+      const { wallet } = this._ensureUserSync({ uid: tx.uid });
+      const coinsToClawback = tx.coinsCredited;
+      const deductedFromBalance = Math.min(wallet.pointsBalance, coinsToClawback);
+      const addedDebt = coinsToClawback - deductedFromBalance;
+
+      wallet.pointsBalance -= deductedFromBalance;
+      wallet.debtCoins = (wallet.debtCoins || 0) + addedDebt;
+      wallet.updatedAtMs = this.now();
+
+      const entry = this._appendLedgerSync({
+        uid: tx.uid,
+        entryType: 'REFUND_CLAWBACK',
+        bucket: 'POINTS',
+        delta: -deductedFromBalance,
+        balanceAfter: wallet.pointsBalance,
+        idempotencyKey: `clawback_${purchaseToken}`,
+        referenceId: purchaseToken,
+        description: `استرداد مشتريات Google Play (-${coinsToClawback} نقطة)`,
+        metadata: {
+          purchaseToken,
+          reason,
+          coinsToClawback,
+          deductedFromBalance,
+          addedDebt,
+          totalDebtCoins: wallet.debtCoins
+        }
+      });
+
+      this._auditSync({
+        actorUid: tx.uid,
+        action: 'IAP_PURCHASE_VOIDED',
+        targetId: purchaseToken,
+        details: {
+          coinsClawedBack: coinsToClawback,
+          deductedFromBalance,
+          addedDebt,
+          reason
+        }
+      });
+
+      if (addedDebt > 0) {
+        this._auditSync({
+          actorUid: 'system',
+          action: 'REFUND_CLAWBACK_DEBT',
+          targetId: tx.uid,
+          details: {
+            debtCoins: wallet.debtCoins,
+            addedDebt,
+            purchaseToken
+          }
+        });
+      }
+
+      // Check if user gifted hosts, flag their earnings for audit
+      const giftEntries = this.ledger.filter(
+        (e) => e.uid === tx.uid && e.entryType === 'GIFT_SENT'
+      );
+      for (const g of giftEntries) {
+        const recipientUid = g.metadata?.recipientUid;
+        if (recipientUid) {
+          this._auditSync({
+            actorUid: 'system',
+            action: 'HOST_EARNINGS_REVIEW_FLAGGED',
+            targetId: recipientUid,
+            details: {
+              buyerUid: tx.uid,
+              giftEntryId: g.entryUuid,
+              reason: 'PURCHASE_REFUNDED_BY_BUYER',
+              purchaseToken
+            }
+          });
+        }
+      }
+
+      return {
+        ok: true,
+        uid: tx.uid,
+        purchaseToken,
+        coinsClawedBack: coinsToClawback,
+        deductedFromBalance,
+        addedDebt,
+        debtCoins: wallet.debtCoins,
+        entry
+      };
+    });
+  }
 }
 
 export class PostgresLedgerStore {
@@ -1003,6 +1183,7 @@ export class PostgresLedgerStore {
     return {
       uid: r.uid,
       pointsBalance: Number(r.points_balance),
+      debtCoins: Number(r.debt_coins || 0),
       hostEarningsCoins: Number(r.host_earnings_coins),
       subAgentsEarningsCoins: Number(r.sub_agents_earnings_coins),
       reservedPayoutCoins: Number(r.reserved_payout_coins),
@@ -1070,6 +1251,40 @@ export class PostgresLedgerStore {
     return this._withTx((c) => this._ensureUserTx(c, input));
   }
 
+  async getIapTransaction(purchaseToken) {
+    return this._withTx(async (c) => {
+      const res = await c.query(`SELECT * FROM iap_transactions WHERE purchase_token = $1`, [purchaseToken]);
+      if (res.rowCount === 0) return null;
+      const r = res.rows[0];
+      return {
+        purchaseToken: r.purchase_token,
+        orderId: r.order_id,
+        uid: r.uid,
+        packageId: r.package_id,
+        productId: r.product_id,
+        coinsCredited: Number(r.coins_credited),
+        amountMicros: Number(r.amount_micros),
+        currencyCode: r.currency_code,
+        purchaseState: r.purchase_state,
+        acknowledged: r.acknowledged,
+        obfuscatedExternalAccountId: r.obfuscated_external_account_id,
+        isVoided: Boolean(r.is_voided),
+        voidedAt: r.voided_at,
+        voidedReason: r.voided_reason,
+        verificationSource: r.verification_source,
+        verifiedAt: r.verified_at
+      };
+    });
+  }
+
+  async markIapAcknowledged(purchaseToken) {
+    const res = await this.pool.query(
+      `UPDATE iap_transactions SET acknowledged = TRUE WHERE purchase_token = $1`,
+      [purchaseToken]
+    );
+    return res.rowCount > 0;
+  }
+
   async getWalletSummary(uid, limit = 50) {
     return this._withTx(async (c) => {
       const { user, wallet } = await this._ensureUserTx(c, { uid });
@@ -1109,6 +1324,7 @@ export class PostgresLedgerStore {
     orderId = null,
     purchaseState = 0,
     acknowledged = true,
+    obfuscatedExternalAccountId = null,
     verificationSource = 'google_play_androidpublisher_v3'
   }) {
     return this._withTx(async (c) => {
@@ -1119,34 +1335,60 @@ export class PostgresLedgerStore {
       const { user, wallet } = await this._ensureUserTx(c, { uid, displayName, email });
       if (user.deletedAt) throw new CallEngineError('ACCOUNT_DELETED', 'هذا الحساب محذوف', 403);
 
-      const ins = await c.query(
+      const insTx = await c.query(
         `INSERT INTO iap_transactions
-          (purchase_token, order_id, uid, package_id, product_id, coins_credited, amount_micros, currency_code, purchase_state, acknowledged, verification_source)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,'USD',$8,$9,$10)
+          (purchase_token, order_id, uid, package_id, product_id, coins_credited, amount_micros, currency_code, purchase_state, acknowledged, obfuscated_external_account_id, verification_source)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,'USD',$8,$9,$10,$11)
          ON CONFLICT (purchase_token) DO NOTHING
-         RETURNING id`,
-        [purchaseToken, orderId, uid, packageId, productId, coins, Math.round(Number(priceUsd) * 1_000_000), purchaseState, acknowledged, verificationSource]
+         RETURNING *`,
+        [purchaseToken, orderId, uid, packageId, productId, coins, Math.round(Number(priceUsd) * 1_000_000), purchaseState, acknowledged, obfuscatedExternalAccountId, verificationSource]
       );
-      if (ins.rowCount === 0) {
-        throw new CallEngineError('DUPLICATE_PURCHASE_TOKEN', 'تم صرف عملية الشراء هذه مسبقاً', 409);
+      if (insTx.rowCount === 0) {
+        const existing = await c.query(`SELECT * FROM iap_transactions WHERE purchase_token = $1`, [purchaseToken]);
+        const exRow = existing.rows[0];
+        if (exRow && exRow.uid === uid) {
+          return { wallet, creditedCoins: Number(exRow.coins_credited), duplicate: true, alreadyCredited: true };
+        }
+        throw new CallEngineError('DUPLICATE_PURCHASE_TOKEN_OTHER_USER', 'رمز الشراء مسجل لحساب مستخدم آخر', 409);
       }
+
+      const currentDebt = wallet.debtCoins || 0;
+      const debtSettled = Math.min(currentDebt, coins);
+      const coinsToCredit = coins - debtSettled;
 
       const upd = await c.query(
         `UPDATE wallet_accounts
          SET points_balance = points_balance + $1,
-             total_accumulated_points = total_accumulated_points + $1,
+             debt_coins = debt_coins - $2,
+             total_accumulated_points = total_accumulated_points + $3,
              updated_at = NOW()
-         WHERE uid = $2
+         WHERE uid = $4
          RETURNING *`,
-        [coins, uid]
+        [coinsToCredit, debtSettled, coins, uid]
       );
       const updatedWallet = this._mapWallet(upd.rows[0]);
+
+      if (debtSettled > 0) {
+        await c.query(
+          `INSERT INTO ledger_entries (entry_uuid, uid, entry_type, bucket, delta, balance_after, idempotency_key, reference_id, description, metadata)
+           VALUES ($1,$2,'PURCHASE_DEBT_SETTLEMENT','DEBT',$3,$4,$5,$6,$7,$8)`,
+          [crypto.randomUUID(), uid, -debtSettled, updatedWallet.debtCoins, `debt_settle_${purchaseToken}`, orderId || purchaseToken, `سداد مديونية سابقة من شحن Google Play (-${debtSettled} نقطة دين)`, JSON.stringify({ purchaseToken, debtSettled })]
+        );
+      }
+
       await c.query(
         `INSERT INTO ledger_entries (entry_uuid, uid, entry_type, bucket, delta, balance_after, idempotency_key, reference_id, description, metadata)
          VALUES ($1,$2,'PURCHASE','POINTS',$3,$4,$5,$6,$7,$8)`,
-        [crypto.randomUUID(), uid, coins, updatedWallet.pointsBalance, `iap_${purchaseToken}`, orderId || purchaseToken, `شحن Google Play (+${coins} نقطة)`, JSON.stringify({ packageId, productId, verificationSource })]
+        [crypto.randomUUID(), uid, coinsToCredit, updatedWallet.pointsBalance, `iap_${purchaseToken}`, orderId || purchaseToken, debtSettled > 0 ? `شحن Google Play (+${coins} نقطة، سدد منها ${debtSettled} دين، والمضاف ${coinsToCredit})` : `شحن Google Play (+${coins} نقطة)`, JSON.stringify({ packageId, productId, verificationSource, debtSettled })]
       );
-      return { wallet: updatedWallet, creditedCoins: coins };
+
+      await c.query(
+        `INSERT INTO audit_logs (actor_uid, action, target_id, details)
+         VALUES ($1, 'IAP_PURCHASE_CREDITED', $2, $3)`,
+        [uid, packageId, JSON.stringify({ coinsCredited: coins, debtSettled, orderId })]
+      );
+
+      return { wallet: updatedWallet, creditedCoins: coins, debtSettled, duplicate: false, alreadyCredited: false };
     });
   }
 
@@ -1164,6 +1406,11 @@ export class PostgresLedgerStore {
       }
 
       const { wallet } = await this._ensureUserTx(c, { uid });
+      if ((wallet.debtCoins || 0) > 0) {
+        throw new CallEngineError('ACCOUNT_HAS_DEBT', 'لا يمكن استخدام النقاط لوجود مديونية مستردات على الحساب. يرجى سداد المديونية أولاً.', 403, {
+          debtCoins: wallet.debtCoins
+        });
+      }
       if (wallet.pointsBalance < spendAmount) {
         throw new CallEngineError('INSUFFICIENT_COINS', 'رصيد النقاط غير كافٍ لإتمام العملية', 402);
       }
@@ -1295,6 +1542,11 @@ export class PostgresLedgerStore {
 
       const sender = await this._ensureUserTx(c, { uid: senderUid });
       const recipient = await this._ensureUserTx(c, { uid: recipientUid });
+      if ((sender.wallet.debtCoins || 0) > 0) {
+        throw new CallEngineError('ACCOUNT_HAS_DEBT', 'لا يمكن إرسال الهدايا لوجود مديونية مستردات على الحساب.', 403, {
+          debtCoins: sender.wallet.debtCoins
+        });
+      }
       if (sender.wallet.pointsBalance < cost) {
         throw new CallEngineError('INSUFFICIENT_COINS', 'رصيد النقاط غير كافٍ لإرسال هذه الهدية', 402);
       }
@@ -1308,14 +1560,14 @@ export class PostgresLedgerStore {
         [hostShare, recipientUid]
       );
       await c.query(
-        `INSERT INTO ledger_entries (entry_uuid, uid, entry_type, bucket, delta, balance_after, idempotency_key, reference_id, description)
-         VALUES ($1,$2,'GIFT_SENT','POINTS',$3,$4,$5,$6,$7)`,
-        [crypto.randomUUID(), senderUid, -cost, Number(sUpd.rows[0].points_balance), key, streamId || recipientUid, `إرسال هدية ${giftName || giftId}`]
+        `INSERT INTO ledger_entries (entry_uuid, uid, entry_type, bucket, delta, balance_after, idempotency_key, reference_id, description, metadata)
+         VALUES ($1,$2,'GIFT_SENT','POINTS',$3,$4,$5,$6,$7,$8)`,
+        [crypto.randomUUID(), senderUid, -cost, Number(sUpd.rows[0].points_balance), key, streamId || recipientUid, `إرسال هدية ${giftName || giftId}`, JSON.stringify({ recipientUid, giftId, streamId })]
       );
       await c.query(
-        `INSERT INTO ledger_entries (entry_uuid, uid, entry_type, bucket, delta, balance_after, idempotency_key, reference_id, description)
-         VALUES ($1,$2,'GIFT_RECEIVE','HOST_EARNINGS',$3,$4,$5,$6,$7)`,
-        [crypto.randomUUID(), recipientUid, hostShare, Number(rUpd.rows[0].host_earnings_coins), `${key}_rx`, streamId || senderUid, `أرباح هدية ${giftName || giftId}`]
+        `INSERT INTO ledger_entries (entry_uuid, uid, entry_type, bucket, delta, balance_after, idempotency_key, reference_id, description, metadata)
+         VALUES ($1,$2,'GIFT_RECEIVE','HOST_EARNINGS',$3,$4,$5,$6,$7,$8)`,
+        [crypto.randomUUID(), recipientUid, hostShare, Number(rUpd.rows[0].host_earnings_coins), `${key}_rx`, streamId || senderUid, `أرباح هدية ${giftName || giftId}`, JSON.stringify({ senderUid, giftId, streamId })]
       );
 
       let agentShare = 0;
@@ -1394,6 +1646,11 @@ export class PostgresLedgerStore {
         throw new CallEngineError('MIN_PAYOUT_NOT_MET', `الحد الأدنى لسحب الأرباح هو ${MIN_PAYOUT_COINS} نقطة`, 400);
       }
       const { user, wallet } = await this._ensureUserTx(c, { uid });
+      if ((wallet.debtCoins || 0) > 0) {
+        throw new CallEngineError('ACCOUNT_HAS_DEBT', 'لا يمكن طلب سحب الأرباح لوجود مديونية مستردات على الحساب.', 403, {
+          debtCoins: wallet.debtCoins
+        });
+      }
       if (!user.ageVerified) throw new CallEngineError('AGE_VERIFICATION_REQUIRED', 'توثيق العمر مطلوب', 403);
       if (!user.isAgent && !user.isHost) throw new CallEngineError('PAYOUT_ROLE_REQUIRED', 'متاح للمضيفين والوكلاء فقط', 403);
       const avail = wallet.hostEarningsCoins + wallet.subAgentsEarningsCoins;
@@ -1622,6 +1879,94 @@ export class PostgresLedgerStore {
   async deleteUserAccount({ uid }) {
     await this.pool.query(`UPDATE users SET deleted_at=$1, display_name='حساب محذوف', email='', dob=NULL, bio='', photo_url=NULL WHERE uid=$2`, [this.now(), uid]);
     return { deleted: true, uid };
+  }
+
+  async processVoidedPurchase({ purchaseToken, reason = 'PLAY_STORE_REFUND' }) {
+    return this._withTx(async (c) => {
+      const res = await c.query(`SELECT * FROM iap_transactions WHERE purchase_token = $1 FOR UPDATE`, [purchaseToken]);
+      if (res.rowCount === 0) {
+        throw new CallEngineError('IAP_NOT_FOUND', 'عملية الشراء غير موجودة', 404);
+      }
+      const tx = res.rows[0];
+      if (tx.is_voided) {
+        return { duplicate: true, alreadyVoided: true, purchaseToken, uid: tx.uid };
+      }
+
+      await c.query(
+        `UPDATE iap_transactions SET is_voided = TRUE, voided_at = NOW(), voided_reason = $1 WHERE purchase_token = $2`,
+        [reason, purchaseToken]
+      );
+
+      const { wallet } = await this._ensureUserTx(c, { uid: tx.uid });
+      const coinsToClawback = Number(tx.coins_credited);
+      const deductedFromBalance = Math.min(wallet.pointsBalance, coinsToClawback);
+      const addedDebt = coinsToClawback - deductedFromBalance;
+
+      const upd = await c.query(
+        `UPDATE wallet_accounts
+         SET points_balance = points_balance - $1,
+             debt_coins = debt_coins + $2,
+             updated_at = NOW()
+         WHERE uid = $3
+         RETURNING *`,
+        [deductedFromBalance, addedDebt, tx.uid]
+      );
+      const updatedWallet = this._mapWallet(upd.rows[0]);
+
+      await c.query(
+        `INSERT INTO ledger_entries (entry_uuid, uid, entry_type, bucket, delta, balance_after, idempotency_key, reference_id, description, metadata)
+         VALUES ($1,$2,'REFUND_CLAWBACK','POINTS',$3,$4,$5,$6,$7,$8)`,
+        [
+          crypto.randomUUID(),
+          tx.uid,
+          -deductedFromBalance,
+          updatedWallet.pointsBalance,
+          `clawback_${purchaseToken}`,
+          purchaseToken,
+          `استرداد مشتريات Google Play (-${coinsToClawback} نقطة)`,
+          JSON.stringify({ purchaseToken, reason, coinsToClawback, deductedFromBalance, addedDebt, totalDebtCoins: updatedWallet.debtCoins })
+        ]
+      );
+
+      await c.query(
+        `INSERT INTO audit_logs (actor_uid, action, target_id, details)
+         VALUES ($1, 'IAP_PURCHASE_VOIDED', $2, $3)`,
+        [tx.uid, purchaseToken, JSON.stringify({ coinsClawedBack: coinsToClawback, deductedFromBalance, addedDebt, reason })]
+      );
+
+      if (addedDebt > 0) {
+        await c.query(
+          `INSERT INTO audit_logs (actor_uid, action, target_id, details)
+           VALUES ('system', 'REFUND_CLAWBACK_DEBT', $1, $2)`,
+          [tx.uid, JSON.stringify({ debtCoins: updatedWallet.debtCoins, addedDebt, purchaseToken })]
+        );
+      }
+
+      // Flag hosts who received gifts from this buyer
+      const gifts = await c.query(
+        `SELECT DISTINCT COALESCE(metadata->>'recipientUid', reference_id) AS recipient_uid FROM ledger_entries WHERE uid = $1 AND entry_type = 'GIFT_SENT'`,
+        [tx.uid]
+      );
+      for (const row of gifts.rows) {
+        if (row.recipient_uid) {
+          await c.query(
+            `INSERT INTO audit_logs (actor_uid, action, target_id, details)
+             VALUES ('system', 'HOST_EARNINGS_REVIEW_FLAGGED', $1, $2)`,
+            [row.recipient_uid, JSON.stringify({ buyerUid: tx.uid, reason: 'PURCHASE_REFUNDED_BY_BUYER', purchaseToken })]
+          );
+        }
+      }
+
+      return {
+        ok: true,
+        uid: tx.uid,
+        purchaseToken,
+        coinsClawedBack: coinsToClawback,
+        deductedFromBalance,
+        addedDebt,
+        debtCoins: updatedWallet.debtCoins
+      };
+    });
   }
 }
 

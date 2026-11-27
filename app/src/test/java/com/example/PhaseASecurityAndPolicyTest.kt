@@ -6,8 +6,11 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.performTextReplacement
+import com.example.billing.PlayBillingManager
 import com.example.data.model.UserProfile
+import com.example.data.remote.BackendWalletDto
 import com.example.data.remote.FeatureFlagsDto
+import com.example.data.remote.VerifyPlayPurchaseResponseDto
 import com.example.ui.screens.AgeVerificationGateScreen
 import com.example.ui.theme.AyerTheme
 import com.example.util.AgePolicyUtils
@@ -180,5 +183,23 @@ class PhaseASecurityAndPolicyTest {
         assertEquals("1996-04-20", submittedDob)
         assertTrue(submittedTerms)
         assertTrue(submittedPrivacy)
+    }
+
+    @Test
+    fun `PlayBillingManager sha256Hex produces 64-char lowercase hex matching server verification`() {
+        val hash = PlayBillingManager.sha256Hex("legit_user_uid_123")
+        assertEquals(64, hash.length)
+        assertTrue(hash.all { it in '0'..'9' || it in 'a'..'f' })
+        // Standard SHA-256 of "abc"
+        assertEquals(
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            PlayBillingManager.sha256Hex("abc")
+        )
+        val walletDto = BackendWalletDto()
+        assertEquals(0, walletDto.debtCoins)
+        val respDto = VerifyPlayPurchaseResponseDto(wallet = walletDto)
+        assertEquals(0, respDto.debtSettled)
+        assertFalse(respDto.alreadyCredited)
+        assertFalse(respDto.duplicate)
     }
 }

@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS wallet_accounts (
     uid TEXT PRIMARY KEY REFERENCES users(uid) ON DELETE CASCADE,
     points_balance BIGINT NOT NULL DEFAULT 0 CHECK (points_balance >= 0),
+    debt_coins BIGINT NOT NULL DEFAULT 0 CHECK (debt_coins >= 0),
     host_earnings_coins BIGINT NOT NULL DEFAULT 0 CHECK (host_earnings_coins >= 0),
     sub_agents_earnings_coins BIGINT NOT NULL DEFAULT 0 CHECK (sub_agents_earnings_coins >= 0),
     reserved_payout_coins BIGINT NOT NULL DEFAULT 0 CHECK (reserved_payout_coins >= 0),
@@ -73,6 +74,10 @@ CREATE TABLE IF NOT EXISTS iap_transactions (
     currency_code TEXT NOT NULL DEFAULT 'USD',
     purchase_state INT NOT NULL,
     acknowledged BOOLEAN NOT NULL DEFAULT FALSE,
+    obfuscated_external_account_id TEXT,
+    is_voided BOOLEAN NOT NULL DEFAULT FALSE,
+    voided_at TIMESTAMPTZ,
+    voided_reason TEXT,
     verification_source TEXT NOT NULL,
     verified_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -184,3 +189,10 @@ CREATE TABLE IF NOT EXISTS audit_logs (
     details JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- WP-2 idempotent schema upgrades for pre-existing deployments
+ALTER TABLE wallet_accounts ADD COLUMN IF NOT EXISTS debt_coins BIGINT NOT NULL DEFAULT 0 CHECK (debt_coins >= 0);
+ALTER TABLE iap_transactions ADD COLUMN IF NOT EXISTS obfuscated_external_account_id TEXT;
+ALTER TABLE iap_transactions ADD COLUMN IF NOT EXISTS is_voided BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE iap_transactions ADD COLUMN IF NOT EXISTS voided_at TIMESTAMPTZ;
+ALTER TABLE iap_transactions ADD COLUMN IF NOT EXISTS voided_reason TEXT;
