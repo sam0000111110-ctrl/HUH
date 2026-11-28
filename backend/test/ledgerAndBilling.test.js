@@ -69,6 +69,18 @@ async function api(baseUrl, method, path, token, body = null) {
   return { status: res.status, json };
 }
 
+async function approveAdult(ledger, uid) {
+  await ledger.submitAgeVerification({
+    uid,
+    displayName: uid,
+    email: `${uid}@example.com`,
+    dob: '1995-05-12',
+    acceptedTermsAt: 1000,
+    acceptedPrivacyAt: 1000
+  });
+  await ledger.reviewAgeVerification({ reviewerUid: 'admin_1', targetUid: uid, decision: 'APPROVED' });
+}
+
 test('Google Play purchaseToken is idempotent for same user, rejects replay by other users, and enforces server catalog', async () => {
   const srv = await startTestServer();
   try {
@@ -122,6 +134,7 @@ test('ACID wallet spend rejects overdrafts under concurrent debits and daily bon
       productId: 'ayer_coins_100',
       purchaseToken: 'pt_user_a_100'
     }); // balance = 110
+    await approveAdult(srv.ledger, 'user_a');
 
     const spends = await Promise.all([
       api(srv.baseUrl, 'POST', '/api/wallet/spend', 'u:user_a', { amount: 80, entryType: 'MATCH_SPEND', idempotencyKey: 'sp_1' }),
@@ -178,34 +191,50 @@ test('Atomic gift splits host earnings and parent agency commission and supports
     });
     assert.equal(recruit.status, 201);
 
-    // Buyer purchases 1400 coins (pkg_1200) and sends 1200-coin gift to host_1
+    // Buyer purchases 1400 coins (pkg_1200) and sends two 600-coin gift_rocket gifts (1200 total) to host_1
     await api(srv.baseUrl, 'POST', '/api/billing/verify-play-purchase', 'u:sender_1', {
       packageName: 'com.aistudio.ayer.live',
       productId: 'ayer_coins_1200',
       purchaseToken: 'pt_sender_1200'
     });
+    await approveAdult(srv.ledger, 'sender_1');
 
-    const gift = await api(srv.baseUrl, 'POST', '/api/wallet/gift', 'u:sender_1', {
+    const giftA = await api(srv.baseUrl, 'POST', '/api/wallet/gift', 'u:sender_1', {
       recipientUid: 'host_1',
-      giftId: 'gift_crown',
-      giftName: 'تاج ملكي',
-      coinsCost: 1200,
-      idempotencyKey: 'gift_tx_001'
+      giftId: 'gift_rocket',
+      idempotencyKey: 'gift_tx_001a'
     });
-    assert.equal(gift.status, 200);
-    assert.equal(gift.json.senderWallet.pointsBalance, 200);
-    assert.equal(gift.json.recipientEarningsAdded, 600);
-    assert.equal(gift.json.agentCommissionAdded, 240);
+    assert.equal(giftA.status, 200);
+    const giftB = await api(srv.baseUrl, 'POST', '/api/wallet/gift', 'u:sender_1', {
+      recipientUid: 'host_1',
+      giftId: 'gift_rocket',
+      idempotencyKey: 'gift_tx_001b'
+    });
+    assert.equal(giftB.status, 200);
+    assert.equal(giftB.json.senderWallet.pointsBalance, 200);
+    assert.equal(giftA.json.recipientEarningsAdded + giftB.json.recipientEarningsAdded, 600);
+    assert.equal(giftA.json.agentCommissionAdded + giftB.json.agentCommissionAdded, 240);
 
-    // host_1 must verify +18 age before payout
-    const underage = await api(srv.baseUrl, 'POST', '/api/age-verification/submit', 'u:host_1', {
+    // Underage user is permanently locked on underage DOB submission (WP-4 B1)
+    const underage = await api(srv.baseUrl, 'POST', '/api/age-verification/submit', 'u:host_underage', {
       dob: '2012-01-01',
       ageYears: 14,
       acceptedTermsAt: 1000,
       acceptedPrivacyAt: 1000
     });
     assert.equal(underage.status, 403);
+    assert.equal(underage.json.error, 'UNDERAGE_FORBIDDEN');
 
+    const underageRetry = await api(srv.baseUrl, 'POST', '/api/age-verification/submit', 'u:host_underage', {
+      dob: '1995-01-01',
+      ageYears: 31,
+      acceptedTermsAt: 1000,
+      acceptedPrivacyAt: 1000
+    });
+    assert.equal(underageRetry.status, 403);
+    assert.equal(underageRetry.json.error, 'UNDERAGE_LOCKED');
+
+    // host_1 must verify +18 age before payout
     const payoutBeforeVerify = await api(srv.baseUrl, 'POST', '/api/payouts/request', 'u:host_1', {
       amountCoins: 500,
       bankAccountHolder: 'هدى أحمد',
@@ -250,7 +279,7 @@ test('Atomic gift splits host earnings and parent agency commission and supports
     assert.equal(rej.json.wallet.hostEarningsCoins, 600);
     assert.equal(rej.json.wallet.reservedPayoutCoins, 0);
 
-    // host_1 resubmits and admin marks PAID
+    // host_1 resubmits -> 24h hold blocks immediate approval, then passes after 24h
     const p2 = await api(srv.baseUrl, 'POST', '/api/payouts/request', 'u:host_1', {
       amountCoins: 500,
       bankAccountHolder: 'هدى أحمد',
@@ -258,6 +287,17 @@ test('Atomic gift splits host earnings and parent agency commission and supports
       ibanOrAccount: 'EG999988887777'
     });
     assert.equal(p2.status, 201);
+    assert.equal(p2.json.request.ibanOrAccount, '********7777');
+    assert.equal(p2.json.request.usdEquivalentCents, 200); // 500 coins @ 250/$1 = $2.00
+
+    const tooEarly = await api(srv.baseUrl, 'POST', `/api/admin/payouts/${p2.json.request.id}/review`, 'u:admin_1', {
+      decision: 'PAID',
+      paymentReference: 'WIRE-2026-EARLY'
+    });
+    assert.equal(tooEarly.status, 409);
+    assert.equal(tooEarly.json.error, 'PAYOUT_HOLD_ACTIVE');
+
+    srv.nowMsRef.value += 24 * 60 * 60 * 1000 + 1;
 
     const paid = await api(srv.baseUrl, 'POST', `/api/admin/payouts/${p2.json.request.id}/review`, 'u:admin_1', {
       decision: 'PAID',
@@ -300,16 +340,28 @@ test('Moderation reports, user blocks, and account deletion endpoints work safel
     assert.equal(del.status, 200);
     assert.equal(del.json.deleted, true);
 
-    // Authoritative mission reward (server catalog + daily replay guard) & host application
-    const mOk = await api(srv.baseUrl, 'POST', '/api/wallet/mission-reward', 'u:mission_user', {
+    // Authoritative mission reward (server-verified activity + daily replay guard)
+    const mChatRemoved = await api(srv.baseUrl, 'POST', '/api/wallet/mission-reward', 'u:mission_user', {
       missionId: 'mission_chat'
     });
+    assert.equal(mChatRemoved.status, 400);
+
+    const mUnverified = await api(srv.baseUrl, 'POST', '/api/wallet/mission-reward', 'u:mission_user', {
+      missionId: 'mission_matches'
+    });
+    assert.equal(mUnverified.status, 403);
+    assert.equal(mUnverified.json.error, 'MISSION_NOT_VERIFIED');
+
+    await srv.ledger.recordServerActivity({ uid: 'mission_user', activityType: 'MATCH_COMPLETED', count: 1 });
+    const mOk = await api(srv.baseUrl, 'POST', '/api/wallet/mission-reward', 'u:mission_user', {
+      missionId: 'mission_matches'
+    });
     assert.equal(mOk.status, 200);
-    assert.equal(mOk.json.creditedCoins, 20);
-    assert.equal(mOk.json.wallet.pointsBalance, 20);
+    assert.equal(mOk.json.creditedCoins, 10);
+    assert.equal(mOk.json.wallet.pointsBalance, 10);
 
     const mDup = await api(srv.baseUrl, 'POST', '/api/wallet/mission-reward', 'u:mission_user', {
-      missionId: 'mission_chat'
+      missionId: 'mission_matches'
     });
     assert.equal(mDup.status, 409);
 
@@ -318,6 +370,7 @@ test('Moderation reports, user blocks, and account deletion endpoints work safel
     });
     assert.equal(mBad.status, 400);
 
+    await approveAdult(srv.ledger, 'mission_user');
     const hostApply = await api(srv.baseUrl, 'POST', '/api/host/apply', 'u:mission_user', {
       agencyName: 'الوكالة الماسية'
     });
@@ -431,6 +484,7 @@ test('WP-2: Voided Purchase clawback enforces non-negative balance, records debt
     assert.equal(buyRes.json.wallet.pointsBalance, 110);
     assert.equal(buyRes.json.wallet.debtCoins, 0);
 
+    await approveAdult(srv.ledger, 'clawback_user');
     // 2. User spends 80 coins (balance = 30)
     const spendRes = await api(srv.baseUrl, 'POST', '/api/wallet/spend', 'u:clawback_user', {
       amount: 80,
@@ -681,11 +735,12 @@ test('WP-2: Missing obfuscatedExternalAccountId in Play receipt is rejected with
       purchaseToken: 'pt_gift_refund_001'
     });
 
-    // Buyer gifts 50 coins to host_review_target
+    await approveAdult(srv.ledger, 'gifting_buyer');
+    // Buyer gifts 50 coins (gift_crown) to host_review_target
     const giftRes = await api(srv.baseUrl, 'POST', '/api/wallet/gift', 'u:gifting_buyer', {
       recipientUid: 'host_review_target',
-      giftId: 'rose',
-      giftName: 'Rose',
+      giftId: 'gift_crown',
+      giftName: 'تاج الملوك',
       coinsCost: 50,
       idempotencyKey: 'gift_before_refund_1'
     });
@@ -751,12 +806,13 @@ test('WP-2: PostgresLedgerStore SQL parity for idempotent IAP credit, clawback, 
       const q = sql.replace(/\s+/g, ' ').trim();
       if (q === 'BEGIN' || q === 'COMMIT' || q === 'ROLLBACK') return { rowCount: 0, rows: [] };
       if (q.startsWith('INSERT INTO users')) {
-        const [uid, displayName, email, referralCode] = params;
+        const [uid, displayName, email, referralCode, isAdmin, adminRole] = params;
         if (!db.users.has(uid)) {
           db.users.set(uid, {
             uid, display_name: displayName, email, photo_url: null, bio: '', country: '', country_code: '',
             gender: '', dob: null, age_years: 0, age_verified: false, age_verification_status: 'UNVERIFIED',
-            is_admin: false, is_agent: false, is_host: false, host_status: 'NONE',
+            status: 'ACTIVE', status_reason: null, underage_locked: false, underage_locked_reason: null, underage_locked_at: null,
+            is_admin: Boolean(isAdmin), admin_role: adminRole || 'NONE', is_agent: false, is_host: false, host_status: 'NONE',
             agent_commission_percent: 20, host_commission_percent: 50, agency_id: '', referral_code: referralCode,
             profile_visibility: 'PUBLIC', direct_message_permission: 'EVERYONE',
             accepted_terms_at: null, accepted_privacy_at: null, deleted_at: null
@@ -768,8 +824,8 @@ test('WP-2: PostgresLedgerStore SQL parity for idempotent IAP credit, clawback, 
         const [uid] = params;
         if (!db.wallets.has(uid)) {
           db.wallets.set(uid, {
-            uid, points_balance: 0, debt_coins: 0, host_earnings_coins: 0,
-            sub_agents_earnings_coins: 0, reserved_payout_coins: 0,
+            uid, points_balance: 0, debt_coins: 0, held_coins: 0, host_earnings_coins: 0,
+            sub_agents_earnings_coins: 0, reserved_payout_coins: 0, platform_revenue_coins: 0,
             total_accumulated_points: 0, total_points_spent: 0, last_daily_claim_ms: 0
           });
         }
@@ -838,20 +894,32 @@ test('WP-2: PostgresLedgerStore SQL parity for idempotent IAP credit, clawback, 
         w.total_points_spent += spendAmt;
         return { rowCount: 1, rows: [{ ...w }] };
       }
+      if (q.includes('SET platform_revenue_coins = platform_revenue_coins + $1')) {
+        const [amt, uid] = params;
+        const w = db.wallets.get(uid);
+        w.platform_revenue_coins += amt;
+        return { rowCount: 1, rows: [{ ...w }] };
+      }
       if (q.startsWith('SELECT * FROM ledger_entries WHERE idempotency_key = $1')) {
         const found = db.ledger.filter((e) => e.idempotency_key === params[0]);
         return { rowCount: found.length, rows: found };
       }
       if (q.startsWith('INSERT INTO ledger_entries')) {
-        if (q.includes("'PURCHASE_DEBT_SETTLEMENT'") || q.includes("'PURCHASE'") || q.includes("'REFUND_CLAWBACK'")) {
+        if (q.includes("'PURCHASE_DEBT_SETTLEMENT'") || q.includes("'PURCHASE'") || q.includes("'REFUND_CLAWBACK'") || q.includes("'PLATFORM_REVENUE'")) {
           const [entry_uuid, uid, delta, balance_after, idempotency_key, reference_id, description, metadata] = params;
           const entry_type = q.includes("'PURCHASE_DEBT_SETTLEMENT'")
             ? 'PURCHASE_DEBT_SETTLEMENT'
-            : q.includes("'REFUND_CLAWBACK'") ? 'REFUND_CLAWBACK' : 'PURCHASE';
-          db.ledger.push({ entry_uuid, uid, entry_type, delta, balance_after, idempotency_key, reference_id, description, metadata: JSON.parse(metadata) });
+            : q.includes("'REFUND_CLAWBACK'")
+              ? 'REFUND_CLAWBACK'
+              : q.includes("'PLATFORM_REVENUE'") ? 'PLATFORM_REVENUE' : 'PURCHASE';
+          if (!db.ledger.some((e) => e.idempotency_key === idempotency_key)) {
+            db.ledger.push({ entry_uuid, uid, entry_type, delta, balance_after, idempotency_key, reference_id, description, metadata: JSON.parse(metadata) });
+          }
         } else {
           const [entry_uuid, uid, entry_type, delta, balance_after, idempotency_key, reference_id, description, metadata] = params;
-          db.ledger.push({ entry_uuid, uid, entry_type, delta, balance_after, idempotency_key, reference_id, description, metadata: JSON.parse(metadata) });
+          if (!db.ledger.some((e) => e.idempotency_key === idempotency_key)) {
+            db.ledger.push({ entry_uuid, uid, entry_type, delta, balance_after, idempotency_key, reference_id, description, metadata: JSON.parse(metadata) });
+          }
         }
         return { rowCount: 1, rows: [] };
       }
@@ -928,7 +996,9 @@ test('WP-2: PostgresLedgerStore SQL parity for idempotent IAP credit, clawback, 
     (err) => err.code === 'DUPLICATE_PURCHASE_TOKEN_OTHER_USER' && err.statusCode === 409
   );
 
-  // 3. Spend 70 coins (balance -> 40) + record a historical GIFT_SENT ledger row
+  // 3. Verify +18 then spend 70 coins (balance -> 40) + record a historical GIFT_SENT ledger row
+  db.users.get('pg_user_1').age_verified = true;
+  db.users.get('pg_user_1').age_verification_status = 'APPROVED';
   const spendRes = await pgStore.spendCoins({ uid: 'pg_user_1', amount: 70, idempotencyKey: 'pg_sp_1' });
   assert.equal(spendRes.wallet.pointsBalance, 40);
   db.ledger.push({

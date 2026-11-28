@@ -23,6 +23,7 @@ import com.example.data.model.SubAgentItem
 import com.example.data.model.UserEngagementState
 import com.example.data.model.UserProfile
 import com.example.data.model.UserProfileReport
+import com.example.billing.PlayBillingManager
 import com.example.data.remote.AdminAgeVerificationItemDto
 import com.example.data.remote.AdminUpdateRolesRequestDto
 import com.example.data.remote.ApplyHostRequestDto
@@ -34,6 +35,7 @@ import com.example.data.remote.BackendWalletDto
 import com.example.data.remote.BlockUserRequestDto
 import com.example.data.remote.CreatePayoutRequestDto
 import com.example.data.remote.CreateReportRequestDto
+import com.example.data.remote.EconomyConfigDto
 import com.example.data.remote.FeatureFlagsDto
 import com.example.data.remote.FirestoreChatService
 import com.example.data.remote.JoinMatchRequestDto
@@ -52,6 +54,7 @@ import com.example.data.remote.SpendCoinsRequestDto
 import com.example.data.remote.StartStreamRequestDto
 import com.example.data.remote.StreamSessionResponseDto
 import com.example.data.remote.SubmitAgeVerificationRequestDto
+import com.example.data.remote.UpdateEconomyConfigRequestDto
 import com.example.data.remote.VerifyPlayPurchaseRequestDto
 import com.example.util.AgePolicyUtils
 import com.example.util.SecurityUtils
@@ -122,56 +125,44 @@ class AyerRepository(
             DailyMissionItem(
                 id = "mission_stream",
                 title = "مشاهدة البث المباشر",
-                description = "شاهد البثوث المباشرة لمدة 30 دقيقة اليوم",
+                description = "انضم إلى بث مباشر وادعمه اليوم (موثّق من الخادم)",
                 iconName = "live",
                 currentProgress = 0,
-                targetProgress = 30,
-                rewardPoints = 35,
-                unit = "دقيقة"
-            ),
-            DailyMissionItem(
-                id = "mission_chat",
-                title = "إرسال رسائل في الدردشة",
-                description = "تفاعل وأرسل 10 رسائل في غرف المطابقة والمحادثات",
-                iconName = "chat",
-                currentProgress = 0,
-                targetProgress = 10,
-                rewardPoints = 20,
-                unit = "رسائل"
+                targetProgress = 1,
+                rewardPoints = 10,
+                unit = "بث"
             ),
             DailyMissionItem(
                 id = "mission_matches",
-                title = "إجراء مطابقات عشوائية",
-                description = "أكمل 5 مطابقات جديدة وتواصل مع أعضاء حول العالم",
+                title = "إجراء مطابقة عشوائية",
+                description = "أكمل مطابقة حقيقية عبر طابور الخادم (موثّق من الخادم)",
                 iconName = "match",
                 currentProgress = 0,
-                targetProgress = 5,
-                rewardPoints = 25,
+                targetProgress = 1,
+                rewardPoints = 10,
                 unit = "مطابقة"
             ),
             DailyMissionItem(
                 id = "mission_gifts",
-                title = "إرسال هدايا تشجيعية",
-                description = "ادعم المضيفين المفضلين بإرسال 3 هدايا في البث",
+                title = "إرسال هدية تشجيعية",
+                description = "أرسل هدية موثقة في البث المباشر (موثّق من الخادم)",
                 iconName = "gift",
                 currentProgress = 0,
-                targetProgress = 3,
-                rewardPoints = 30,
-                unit = "هدايا"
-            ),
-            DailyMissionItem(
-                id = "mission_daily_login",
-                title = "تسجيل الحضور اليومي",
-                description = "حافظ على سلسلة التواجد اليومي النشط في التطبيق",
-                iconName = "login",
-                currentProgress = 0,
                 targetProgress = 1,
-                rewardPoints = 15,
-                unit = "يوم"
+                rewardPoints = 5,
+                unit = "هدية"
             )
         )
     )
     val dailyMissions = _dailyMissions.asStateFlow()
+
+    internal fun getInstallDeviceIdHash(): String {
+        val prefs = context.applicationContext.getSharedPreferences("ayer_device_prefs", Context.MODE_PRIVATE)
+        val raw = prefs.getString("install_device_uuid", null) ?: UUID.randomUUID().toString().also {
+            prefs.edit().putString("install_device_uuid", it).apply()
+        }
+        return PlayBillingManager.sha256Hex(raw)
+    }
 
     val flaggedStreamIds = firestoreChatService.flaggedStreamIds
     val submittedReports = firestoreChatService.submittedReports
@@ -330,13 +321,6 @@ class AyerRepository(
                 firestoreChatService.saveFcmToken(firebaseUser.uid, fcmToken)
             }
         }
-        _dailyMissions.value = _dailyMissions.value.map { mission ->
-            if (mission.id == "mission_daily_login") {
-                mission.copy(currentProgress = 1)
-            } else {
-                mission
-            }
-        }
         if (remoteResult.isFailure && localExisting == null) {
             return Result.failure(remoteResult.exceptionOrNull() ?: IllegalStateException("Sync failed"))
         }
@@ -489,12 +473,6 @@ class AyerRepository(
     }
 
     suspend fun recordChatMessageEngagement() {
-        val currentMissions = _dailyMissions.value
-        _dailyMissions.value = currentMissions.map { mission ->
-            if (mission.id == "mission_chat") {
-                mission.copy(currentProgress = (mission.currentProgress + 1).coerceAtMost(mission.targetProgress))
-            } else mission
-        }
         val current = _engagementState.value
         _engagementState.value = current.copy(
             todayEngagementPoints = current.todayEngagementPoints + 2
@@ -552,7 +530,7 @@ class AyerRepository(
         val api = platformApi ?: return false
         val bearer = getBearerHeader() ?: return false
         val res = runCatching {
-            api.claimMissionReward(bearer, MissionRewardRequestDto(missionId = missionId))
+            api.claimMissionReward(bearer, MissionRewardRequestDto(missionId = missionId), getInstallDeviceIdHash())
         }.getOrNull() ?: return false
 
         if (res.isSuccessful && res.body() != null) {
@@ -571,22 +549,7 @@ class AyerRepository(
     }
 
     suspend fun claimDailyMilestoneReward(): Boolean {
-        if (!_featureFlags.value.missionRewardsEnabled) return false
-        val current = _engagementState.value
-        if (current.dailyMilestoneClaimed || current.todayEngagementPoints < 100) return false
-
-        val api = platformApi ?: return false
-        val bearer = getBearerHeader() ?: return false
-        val res = runCatching {
-            api.claimMissionReward(bearer, MissionRewardRequestDto(missionId = "daily_milestone"))
-        }.getOrNull() ?: return false
-
-        if (res.isSuccessful && res.body() != null) {
-            applyAuthoritativeSummary(wallet = res.body()!!.wallet)
-            refreshWalletFromBackend()
-            _engagementState.value = current.copy(dailyMilestoneClaimed = true)
-            return true
-        }
+        // Server-side verifiable missions only (WP-1 A1): unverified milestone minting is permanently disabled
         return false
     }
 
@@ -696,7 +659,7 @@ class AyerRepository(
         val api = platformApi ?: return Result.failure(IllegalStateException("يتطلب استلام المكافأة اليومية اتصالاً بخادم الحسابات."))
         val bearer = getBearerHeader() ?: return Result.failure(IllegalStateException("يرجى تسجيل الدخول أولاً."))
         return try {
-            val res = api.claimDailyBonus(bearer)
+            val res = api.claimDailyBonus(bearer, getInstallDeviceIdHash())
             if (res.isSuccessful && res.body() != null) {
                 val credited = res.body()!!.creditedCoins
                 refreshWalletFromBackend()
@@ -734,46 +697,25 @@ class AyerRepository(
     }
 
     suspend fun sendGift(gift: GiftItem, streamHost: String, recipientUid: String = "", streamId: String? = null): Boolean {
-        val api = platformApi
-        val bearer = getBearerHeader()
-        if (api != null && bearer != null && recipientUid.isNotBlank()) {
-            val res = runCatching {
-                api.sendGift(
-                    bearer,
-                    SendGiftRequestDto(
-                        recipientUid = recipientUid,
-                        giftId = gift.id,
-                        giftName = "${gift.name} ${gift.emoji}",
-                        coinsCost = gift.pointsCost,
-                        idempotencyKey = "gift_${UUID.randomUUID()}",
-                        streamId = streamId
-                    )
+        val api = platformApi ?: return false
+        val bearer = getBearerHeader() ?: return false
+        if (recipientUid.isBlank() && streamId.isNullOrBlank()) return false
+        val res = runCatching {
+            api.sendGift(
+                bearer,
+                SendGiftRequestDto(
+                    recipientUid = recipientUid,
+                    giftId = gift.id,
+                    giftName = "${gift.name} ${gift.emoji}",
+                    coinsCost = gift.pointsCost,
+                    idempotencyKey = "gift_${UUID.randomUUID()}",
+                    streamId = streamId
                 )
-            }.getOrNull() ?: return false
-            if (res.isSuccessful && res.body() != null) {
-                refreshWalletFromBackend()
-                return true
-            }
-            return false
-        }
-        if (api != null && bearer != null) {
-            val res = runCatching {
-                api.spendCoins(
-                    bearer,
-                    SpendCoinsRequestDto(
-                        amount = gift.pointsCost,
-                        entryType = "GIFT_SENT",
-                        description = "إرسال هدية ${gift.name} ${gift.emoji} إلى $streamHost",
-                        idempotencyKey = "gift_${UUID.randomUUID()}",
-                        referenceId = streamId
-                    )
-                )
-            }.getOrNull() ?: return false
-            if (res.isSuccessful) {
-                refreshWalletFromBackend()
-                return true
-            }
-            return false
+            )
+        }.getOrNull() ?: return false
+        if (res.isSuccessful && res.body() != null) {
+            refreshWalletFromBackend()
+            return true
         }
         return false
     }
@@ -1022,6 +964,43 @@ class AyerRepository(
                 Result.success(res.body()!!.user)
             } else {
                 Result.failure(IllegalStateException(BackendPlatformApi.extractErrorMessage(res, "تعذر تحديث صلاحيات المستخدم")))
+            }
+        } catch (t: Throwable) {
+            Result.failure(t)
+        }
+    }
+
+    suspend fun fetchEconomyConfigAdmin(): Result<EconomyConfigDto> {
+        val api = platformApi ?: return Result.failure(IllegalStateException("خادم الإدارة غير مهيأ"))
+        val bearer = getBearerHeader() ?: return Result.failure(IllegalStateException("مطلوب تسجيل الدخول"))
+        return try {
+            val res = api.getEconomyConfigAdmin(bearer)
+            if (res.isSuccessful && res.body() != null) Result.success(res.body()!!)
+            else Result.failure(IllegalStateException(BackendPlatformApi.extractErrorMessage(res, "تعذر جلب إعدادات الاقتصاد")))
+        } catch (t: Throwable) {
+            Result.failure(t)
+        }
+    }
+
+    suspend fun updateEconomyConfigAdmin(
+        hostCommissionPercent: Int? = null,
+        agentCommissionPercent: Int? = null
+    ): Result<EconomyConfigDto> {
+        val api = platformApi ?: return Result.failure(IllegalStateException("خادم الإدارة غير مهيأ"))
+        val bearer = getBearerHeader() ?: return Result.failure(IllegalStateException("مطلوب تسجيل الدخول"))
+        return try {
+            val res = api.updateEconomyConfigAdmin(
+                bearer,
+                UpdateEconomyConfigRequestDto(
+                    hostCommissionPercent = hostCommissionPercent,
+                    agentCommissionPercent = agentCommissionPercent
+                )
+            )
+            if (res.isSuccessful && res.body() != null) {
+                refreshWalletFromBackend()
+                Result.success(res.body()!!)
+            } else {
+                Result.failure(IllegalStateException(BackendPlatformApi.extractErrorMessage(res, "تعذر تحديث إعدادات العمولة العامة")))
             }
         } catch (t: Throwable) {
             Result.failure(t)

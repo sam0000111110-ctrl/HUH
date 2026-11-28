@@ -119,6 +119,9 @@ class AyerViewModel(application: Application) : AndroidViewModel(application) {
     private val _adminReports = MutableStateFlow<List<com.example.data.remote.ModerationReportDto>>(emptyList())
     val adminReports: StateFlow<List<com.example.data.remote.ModerationReportDto>> = _adminReports.asStateFlow()
 
+    private val _adminEconomyConfig = MutableStateFlow(com.example.data.remote.EconomyConfigDto())
+    val adminEconomyConfig: StateFlow<com.example.data.remote.EconomyConfigDto> = _adminEconomyConfig.asStateFlow()
+
     val playBillingManager: PlayBillingManager
     val playProductPrices: StateFlow<Map<String, String>>
     val isPlayBillingReady: StateFlow<Boolean>
@@ -1092,7 +1095,7 @@ class AyerViewModel(application: Application) : AndroidViewModel(application) {
                 ibanOrAccount = ibanOrAccount
             )
             if (res.isSuccess) {
-                _uiNotice.value = "تم تقديم طلب سحب $amountCoins نقطة ($${amountCoins / 10}) للمراجعة الإدارية 🏦"
+                _uiNotice.value = "تم تقديم طلب سحب $amountCoins نقطة (≈ $${String.format(Locale.US, "%.2f", amountCoins / 250.0)}) للمراجعة الإدارية 🏦"
                 onComplete(true)
             } else {
                 _uiNotice.value = res.exceptionOrNull()?.message ?: "تعذر تقديم طلب السحب."
@@ -1129,11 +1132,11 @@ class AyerViewModel(application: Application) : AndroidViewModel(application) {
             _uiNotice.value = "صلاحية تعديل العمولات محصورة بحساب الإدارة."
             return
         }
-        val targetUid = userProfile.value?.uid?.takeIf { it.isNotBlank() } ?: return
         viewModelScope.launch {
-            val res = repository.updateUserRolesAdmin(targetUid = targetUid, agentCommissionPercent = percent)
+            val res = repository.updateEconomyConfigAdmin(agentCommissionPercent = percent)
             _uiNotice.value = if (res.isSuccess) {
-                "تم تحديث نسبة عمولة الوكيل بنجاح من الخادم إلى $percent%"
+                res.getOrNull()?.let { _adminEconomyConfig.value = it }
+                "تم تحديث نسبة عمولة الوكلاء العامة إلى $percent% (حصة المنصة ${res.getOrNull()?.platformCommissionPercent ?: 30}%)"
             } else {
                 res.exceptionOrNull()?.message ?: "تعذر تحديث العمولة"
             }
@@ -1168,6 +1171,9 @@ class AyerViewModel(application: Application) : AndroidViewModel(application) {
             }
             repository.fetchAdminReports("PENDING_REVIEW").onSuccess {
                 _adminReports.value = it
+            }
+            repository.fetchEconomyConfigAdmin().onSuccess {
+                _adminEconomyConfig.value = it
             }
         }
     }

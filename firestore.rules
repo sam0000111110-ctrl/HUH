@@ -3,18 +3,24 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
+    function isTokenAccountActive() {
+      return !('banned' in request.auth.token && request.auth.token.banned == true) &&
+        !('status' in request.auth.token && request.auth.token.status in ['SUSPENDED', 'BANNED']);
+    }
+
     function isAuthenticated() {
-      return request.auth != null;
+      return request.auth != null && isTokenAccountActive();
     }
 
     function isOwner(userId) {
-      return isAuthenticated() && request.auth.uid == userId;
+      return request.auth != null && request.auth.uid == userId;
     }
 
     function isAdmin() {
       return isAuthenticated() && (
         ('admin' in request.auth.token && request.auth.token.admin == true) ||
         ('role' in request.auth.token && request.auth.token.role == 'admin') ||
+        ('adminRole' in request.auth.token && request.auth.token.adminRole in ['SUPER_ADMIN', 'FINANCE_ADMIN', 'MODERATION_ADMIN', 'AGENCY_MANAGER']) ||
         (exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
          'isAdmin' in get(/databases/$(database)/documents/users/$(request.auth.uid)).data &&
          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.isAdmin == true)
@@ -22,14 +28,20 @@ service cloud.firestore {
     }
 
     function isSafeUserSelfCreate(data, userId) {
-      return data.uid == userId &&
+      return isTokenAccountActive() &&
+        data.uid == userId &&
         data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 80 &&
         (!('isAdmin' in data) || data.isAdmin == false) &&
+        (!('adminRole' in data) || data.adminRole == 'NONE') &&
+        (!('status' in data) || data.status == 'ACTIVE') &&
+        (!('underageLocked' in data) || data.underageLocked == false) &&
         (!('isAgent' in data) || data.isAgent == false) &&
         (!('isHost' in data) || data.isHost == false) &&
         (!('ageVerified' in data) || data.ageVerified == false) &&
         (!('ageVerificationStatus' in data) || data.ageVerificationStatus in ['UNVERIFIED', 'PENDING_REVIEW']) &&
         (!('pointsBalance' in data) || data.pointsBalance == 0) &&
+        (!('debtCoins' in data) || data.debtCoins == 0) &&
+        (!('heldCoins' in data) || data.heldCoins == 0) &&
         (!('hostEarningsCoins' in data) || data.hostEarningsCoins == 0) &&
         (!('subAgentsEarningsCoins' in data) || data.subAgentsEarningsCoins == 0) &&
         data.createdAt is timestamp && data.createdAt <= request.time &&
@@ -40,6 +52,11 @@ service cloud.firestore {
       let restrictedFields = [
         'uid',
         'isAdmin',
+        'adminRole',
+        'status',
+        'statusReason',
+        'underageLocked',
+        'underageLockedReason',
         'isAgent',
         'isHost',
         'hostStatus',
@@ -48,6 +65,8 @@ service cloud.firestore {
         'agentCommissionPercent',
         'hostCommissionPercent',
         'pointsBalance',
+        'debtCoins',
+        'heldCoins',
         'totalAccumulatedPoints',
         'totalPointsSpent',
         'hostEarningsCoins',
@@ -55,7 +74,8 @@ service cloud.firestore {
         'subAgentsCount',
         'createdAt'
       ];
-      return !request.resource.data.diff(resource.data).affectedKeys().hasAny(restrictedFields) &&
+      return isTokenAccountActive() &&
+        !request.resource.data.diff(resource.data).affectedKeys().hasAny(restrictedFields) &&
         request.resource.data.updatedAt is timestamp &&
         request.resource.data.updatedAt <= request.time;
     }
@@ -218,7 +238,10 @@ service cloud.firestore {
     // Mandatory +18 Age Verification & Legal Consent Queue
     match /age_verifications/{userId} {
       allow read: if isOwner(userId) || isAdmin();
-      allow create: if isOwner(userId) &&
+      allow create: if isAuthenticated() &&
+        isOwner(userId) &&
+        !(exists(/databases/$(database)/documents/users/$(userId)) &&
+          get(/databases/$(database)/documents/users/$(userId)).data.underageLocked == true) &&
         request.resource.data.userId == request.auth.uid &&
         request.resource.data.status == 'PENDING_REVIEW' &&
         request.resource.data.dob is string &&
@@ -231,7 +254,9 @@ service cloud.firestore {
         request.resource.data.submittedAt is timestamp &&
         request.resource.data.submittedAt <= request.time;
       allow update: if isAdmin() || (
+        isAuthenticated() &&
         isOwner(userId) &&
+        resource.data.status != 'REJECTED_UNDERAGE' &&
         request.resource.data.userId == request.auth.uid &&
         request.resource.data.status == 'PENDING_REVIEW' &&
         request.resource.data.ageYears is int &&
@@ -239,7 +264,7 @@ service cloud.firestore {
         request.resource.data.submittedAt is timestamp &&
         request.resource.data.submittedAt <= request.time
       );
-      allow delete: if isOwner(userId) || isAdmin();
+      allow delete: if isAdmin() || (isAuthenticated() && isOwner(userId) && resource.data.status != 'REJECTED_UNDERAGE');
     }
 
     // Payout Requests

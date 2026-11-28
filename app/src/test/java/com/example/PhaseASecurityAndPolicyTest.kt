@@ -6,11 +6,19 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.performTextReplacement
+import android.app.Application
+import androidx.room.Room
+import androidx.test.core.app.ApplicationProvider
 import com.example.billing.PlayBillingManager
+import com.example.data.local.AyerDatabase
+import com.example.data.model.GiftItem
 import com.example.data.model.UserProfile
 import com.example.data.remote.BackendWalletDto
+import com.example.data.remote.EconomyConfigDto
 import com.example.data.remote.FeatureFlagsDto
+import com.example.data.remote.PayoutRequestDto
 import com.example.data.remote.VerifyPlayPurchaseResponseDto
+import com.example.data.repository.AyerRepository
 import com.example.ui.screens.AgeVerificationGateScreen
 import com.example.ui.theme.AyerTheme
 import com.example.util.AgePolicyUtils
@@ -23,6 +31,7 @@ import com.google.zxing.qrcode.QRCodeReader
 import java.util.Calendar
 import java.util.Locale
 import java.util.TimeZone
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
@@ -201,5 +210,59 @@ class PhaseASecurityAndPolicyTest {
         assertEquals(0, respDto.debtSettled)
         assertFalse(respDto.alreadyCredited)
         assertFalse(respDto.duplicate)
+    }
+
+    @Test
+    fun `WP-1 DTO defaults enforce 250 coins per USD, held coins, platform revenue, and masked IBAN`() {
+        val econ = EconomyConfigDto()
+        assertEquals(250, econ.coinsPerUsd)
+        assertEquals(15, econ.minPlatformPercent)
+        assertEquals(500, econ.minPayoutCoins)
+        assertEquals(24, econ.payoutHoldHours)
+        assertEquals(25, econ.dailyFreeRewardCapCoins)
+        assertEquals(100, econ.hostCommissionPercent + econ.agentCommissionPercent + econ.platformCommissionPercent)
+
+        val wallet = BackendWalletDto()
+        assertEquals(0, wallet.heldCoins)
+        assertEquals(0, wallet.platformRevenueCoins)
+
+        val payout = PayoutRequestDto(ibanMasked = "********7777", usdEquivalentCents = 200L)
+        assertEquals("********7777", payout.ibanMasked)
+        assertEquals(200L, payout.usdEquivalentCents)
+    }
+
+    @Test
+    fun `WP-1 AyerRepository limits missions to server-verifiable actions, hashes install device id, and blocks local fallback`() = runBlocking {
+        val app = ApplicationProvider.getApplicationContext<Application>()
+        val db = Room.inMemoryDatabaseBuilder(app, AyerDatabase::class.java)
+            .allowMainThreadQueries()
+            .build()
+        try {
+            val repo = AyerRepository(
+                context = app,
+                userDao = db.userDao(),
+                transactionDao = db.transactionDao(),
+                notificationDao = db.notificationDao(),
+                platformApi = null
+            )
+
+            val missionIds = repo.dailyMissions.value.map { it.id }
+            assertEquals(listOf("mission_stream", "mission_matches", "mission_gifts"), missionIds)
+            assertFalse("mission_chat" in missionIds)
+            assertFalse("mission_daily_login" in missionIds)
+
+            val hash1 = repo.getInstallDeviceIdHash()
+            val hash2 = repo.getInstallDeviceIdHash()
+            assertEquals(64, hash1.length)
+            assertEquals(hash1, hash2)
+            assertTrue(hash1.all { it in '0'..'9' || it in 'a'..'f' })
+
+            val testGift = GiftItem(id = "gift_rose", name = "وردة", pointsCost = 5, emoji = "🌹", soundEffectDesc = "chime")
+            assertFalse(repo.claimDailyMilestoneReward())
+            assertFalse(repo.sendGift(testGift, streamHost = "Host", recipientUid = "host_1"))
+            assertTrue(repo.updateEconomyConfigAdmin(agentCommissionPercent = 25).isFailure)
+        } finally {
+            db.close()
+        }
     }
 }

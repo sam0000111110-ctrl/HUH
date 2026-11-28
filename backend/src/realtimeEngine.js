@@ -66,10 +66,44 @@ export class RealtimeBroadcastAndMatchEngine {
 
   _pruneStaleQueue(ttlMs = 90_000) {
     const cutoff = this.now() - ttlMs;
+    const expired = [];
     for (const [uid, entry] of this.matchQueue.entries()) {
       if (entry.lastHeartbeatMs < cutoff) {
         this.matchQueue.delete(uid);
+        expired.push({ uid, holdId: entry.holdId || null });
       }
+    }
+    return expired;
+  }
+
+  getActiveMatch(uid) {
+    const existingMatch = this.userActiveMatch.get(uid);
+    if (!existingMatch) return null;
+    const m = this.activeMatches.get(existingMatch.matchId);
+    if (m && m.status === 'ACTIVE') {
+      return {
+        status: 'MATCHED',
+        ...existingMatch
+      };
+    }
+    this.userActiveMatch.delete(uid);
+    return null;
+  }
+
+  takeWaitingHoldId(uid) {
+    const existing = this.matchQueue.get(uid);
+    if (!existing) return null;
+    this.matchQueue.delete(uid);
+    return existing.holdId || null;
+  }
+
+  abortMatch(matchId) {
+    const m = this.activeMatches.get(matchId);
+    if (!m) return;
+    m.status = 'ABORTED';
+    m.endedAtMs = this.now();
+    for (const pUid of m.participantIds) {
+      this.userActiveMatch.delete(pUid);
     }
   }
 
@@ -99,29 +133,31 @@ export class RealtimeBroadcastAndMatchEngine {
     country = '',
     countryCode = 'SA',
     userGender = 'ANY',
-    age = 21,
+    age = null,
+    allowUnverifiedAdmin = false,
     bio = '',
     chatType = 'VIDEO',
     genderFilter = 'ANY',
     countryFilter = 'ANY',
-    blockedUids = []
+    blockedUids = [],
+    holdId = null
   }) {
     if (!uid) {
       throw new CallEngineError('MISSING_UID', 'معرّف المستخدم مطلوب', 400);
     }
-    this._pruneStaleQueue();
+    const numericAge = Number(age);
+    if (!allowUnverifiedAdmin && (!Number.isFinite(numericAge) || numericAge < 18)) {
+      throw new CallEngineError('AGE_VERIFICATION_REQUIRED', 'يلزم أن يكون العمر 18 عاماً فأكثر للمطابقة', 403);
+    }
+    const expiredEntries = this._pruneStaleQueue();
 
     // If user already matched while waiting, return that match directly
-    const existingMatch = this.userActiveMatch.get(uid);
+    const existingMatch = this.getActiveMatch(uid);
     if (existingMatch) {
-      const m = this.activeMatches.get(existingMatch.matchId);
-      if (m && m.status === 'ACTIVE') {
-        return {
-          status: 'MATCHED',
-          ...existingMatch
-        };
-      }
-      this.userActiveMatch.delete(uid);
+      return {
+        ...existingMatch,
+        expiredEntries
+      };
     }
 
     const normalizedType = String(chatType || 'VIDEO').toUpperCase();
@@ -132,12 +168,13 @@ export class RealtimeBroadcastAndMatchEngine {
       country: String(country || '').trim(),
       countryCode: String(countryCode || 'SA').toUpperCase(),
       userGender: String(userGender || 'ANY').toUpperCase(),
-      age: Number(age || 21),
+      age: Number.isFinite(numericAge) && numericAge > 0 ? numericAge : null,
       bio: String(bio || '').trim(),
       chatType: normalizedType,
       genderFilter: String(genderFilter || 'ANY').toUpperCase(),
       countryFilter: String(countryFilter || 'ANY').toUpperCase(),
       cost,
+      holdId,
       blockedUids: new Set(Array.isArray(blockedUids) ? blockedUids : []),
       joinedAtMs: this.now(),
       lastHeartbeatMs: this.now()
@@ -184,6 +221,10 @@ export class RealtimeBroadcastAndMatchEngine {
           costs: {
             [uid]: callerEntry.cost,
             [partnerUid]: candidate.cost
+          },
+          holdIds: {
+            [uid]: callerEntry.holdId,
+            [partnerUid]: candidate.holdId
           }
         };
         this.activeMatches.set(matchId, matchRecord);
@@ -234,6 +275,9 @@ export class RealtimeBroadcastAndMatchEngine {
           newlyMatched: true,
           partnerUid,
           partnerCostCoins: candidate.cost,
+          callerHoldId: callerEntry.holdId,
+          partnerHoldId: candidate.holdId,
+          expiredEntries,
           ...callerPayload
         };
       }
@@ -243,18 +287,21 @@ export class RealtimeBroadcastAndMatchEngine {
     return {
       status: 'WAITING',
       queueSize: this.matchQueue.size,
-      waitSeconds: 0
+      waitSeconds: 0,
+      holdId: callerEntry.holdId,
+      expiredEntries
     };
   }
 
   pollMatchQueue(uid) {
-    this._pruneStaleQueue();
+    const expiredEntries = this._pruneStaleQueue();
     const active = this.userActiveMatch.get(uid);
     if (active) {
       const m = this.activeMatches.get(active.matchId);
       if (m && m.status === 'ACTIVE') {
         return {
           status: 'MATCHED',
+          expiredEntries,
           ...active
         };
       }
@@ -265,18 +312,22 @@ export class RealtimeBroadcastAndMatchEngine {
       return {
         status: 'IDLE',
         queueSize: this.matchQueue.size,
-        waitSeconds: 0
+        waitSeconds: 0,
+        expiredEntries
       };
     }
     waiting.lastHeartbeatMs = this.now();
     return {
       status: 'WAITING',
       queueSize: this.matchQueue.size,
-      waitSeconds: Math.max(0, Math.floor((this.now() - waiting.joinedAtMs) / 1000))
+      waitSeconds: Math.max(0, Math.floor((this.now() - waiting.joinedAtMs) / 1000)),
+      expiredEntries
     };
   }
 
   async leaveMatchQueueOrSession({ uid, matchId = null }) {
+    const waitingEntry = this.matchQueue.get(uid);
+    const releasedHoldId = waitingEntry?.holdId || null;
     this.matchQueue.delete(uid);
     const active = this.userActiveMatch.get(uid);
     const targetMatchId = matchId || active?.matchId;
@@ -293,7 +344,7 @@ export class RealtimeBroadcastAndMatchEngine {
     } else {
       this.userActiveMatch.delete(uid);
     }
-    return { status: 'IDLE' };
+    return { status: 'IDLE', releasedHoldId };
   }
 
   // ==========================================================
@@ -509,5 +560,29 @@ export class RealtimeBroadcastAndMatchEngine {
       }
     }
     return false;
+  }
+
+  async terminateUserSessions({ uid, reason = 'ACCOUNT_SUSPENDED' }) {
+    const waitingHoldId = this.takeWaitingHoldId(uid);
+    const activeMatch = this.userActiveMatch.get(uid);
+    if (activeMatch) {
+      await this.leaveMatchQueueOrSession({ uid, matchId: activeMatch.matchId }).catch(() => {});
+    }
+    const endedStreamIds = [];
+    for (const stream of this.streams.values()) {
+      if (stream.status !== 'LIVE') continue;
+      if (stream.hostUid === uid) {
+        await this.endBroadcast({
+          streamId: stream.id,
+          actorUid: 'system',
+          systemOverride: true,
+          reason
+        }).catch(() => {});
+        endedStreamIds.push(stream.id);
+      } else {
+        stream.viewerUids.delete(uid);
+      }
+    }
+    return { waitingHoldId, endedStreamIds };
   }
 }

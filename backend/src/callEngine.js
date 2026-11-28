@@ -88,15 +88,54 @@ export class AuthoritativeCallEngine {
       blockedUserIds: [...(initialState?.config?.blockedUserIds || [])]
     };
     this.calls = new Map();
-    if (Array.isArray(initialState?.calls)) {
-      for (const c of initialState.calls) {
-        this.calls.set(c.callId, { ...c });
-      }
-    }
-    this.alerts = Array.isArray(initialState?.alerts) ? [...initialState.alerts] : [];
-    this.callLogs = Array.isArray(initialState?.callLogs) ? [...initialState.callLogs] : [];
+    this.alerts = [];
+    this.callLogs = [];
     this.rateLimits = new Map(); // userId -> number[] timestamps
     this.providerErrors = []; // timestamps of provider issues
+    this._pendingAlerts = [];
+    this._pendingLogs = [];
+
+    if (initialState) {
+      this.hydrateState(initialState);
+    }
+  }
+
+  hydrateState(initialState) {
+    if (!initialState || typeof initialState !== 'object') return;
+    if (initialState.config) {
+      this.config = {
+        ...DEFAULT_GOVERNANCE_CONFIG,
+        ...initialState.config,
+        exemptUserIds: [...(initialState.config.exemptUserIds || [])],
+        blockedUserIds: [...(initialState.config.blockedUserIds || [])]
+      };
+    }
+    if (Array.isArray(initialState.calls)) {
+      this.calls.clear();
+      for (const c of initialState.calls) {
+        if (c?.callId) this.calls.set(c.callId, { ...c });
+      }
+    }
+    if (Array.isArray(initialState.alerts)) {
+      this.alerts = initialState.alerts.map((a) => ({ ...a }));
+    }
+    if (Array.isArray(initialState.callLogs)) {
+      this.callLogs = initialState.callLogs.map((l) => ({ ...l }));
+    }
+  }
+
+  drainPendingAlerts() {
+    if (this._pendingAlerts.length === 0) return [];
+    const items = [...this._pendingAlerts];
+    this._pendingAlerts.length = 0;
+    return items;
+  }
+
+  drainPendingLogs() {
+    if (this._pendingLogs.length === 0) return [];
+    const items = [...this._pendingLogs];
+    this._pendingLogs.length = 0;
+    return items;
   }
 
   exportState() {
@@ -272,7 +311,7 @@ export class AuthoritativeCallEngine {
     if (dedupKey && this.alerts.some((a) => a.dedupKey === dedupKey)) {
       return;
     }
-    this.alerts.unshift({
+    const alert = {
       id: `alert_${crypto.randomUUID()}`,
       code,
       severity,
@@ -281,7 +320,9 @@ export class AuthoritativeCallEngine {
       dedupKey,
       createdAt: nowMs,
       acknowledged: false
-    });
+    };
+    this.alerts.unshift(alert);
+    this._pendingAlerts.push({ ...alert });
     if (this.alerts.length > 200) {
       this.alerts.length = 200;
     }
@@ -728,6 +769,7 @@ export class AuthoritativeCallEngine {
       loggedAt: nowMs
     };
     this.callLogs.unshift(entry);
+    this._pendingLogs.push({ ...entry });
     if (this.callLogs.length > 2000) {
       this.callLogs.length = 2000;
     }

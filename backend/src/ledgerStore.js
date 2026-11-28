@@ -3,35 +3,267 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CallEngineError } from './callEngine.js';
+import {
+  encryptSensitiveField,
+  maskAccountNumber,
+  resolveBankEncryptionKey
+} from './cryptoFields.js';
+import { runMigrations } from './migrator.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const MIN_PAYOUT_COINS = 500;
-const DAILY_BONUS_COINS = 10;
-const DAILY_CLAIM_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+export const PLATFORM_TREASURY_UID = '__platform__';
+export const MIN_PLATFORM_PERCENT = 15;
+export const COINS_PER_USD = 250; // $0.0040/coin < net Play proceeds on cheapest pack ($0.004515/coin after 30% Google cut)
+export const MIN_PAYOUT_COINS = 500;
+export const PAYOUT_HOLD_HOURS = 24;
+export const PAYOUT_HOLD_MS = PAYOUT_HOLD_HOURS * 60 * 60 * 1000;
+export const DAILY_BONUS_COINS = 10;
+export const DAILY_CLAIM_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+export const DAILY_FREE_REWARD_CAP_COINS = 25;
+
+export const ALLOWED_CLIENT_SPEND_ENTRY_TYPES = new Set([
+  'MATCH_SPEND',
+  'CALL_MINUTE_CHARGE',
+  'BOOST_PROFILE'
+]);
+
+const SPEND_DESCRIPTIONS = Object.freeze({
+  MATCH_SPEND: 'مطابقة عشوائية',
+  CALL_MINUTE_CHARGE: 'رسوم دقائق مكالمة',
+  BOOST_PROFILE: 'تعزيز الظهور في المنصة'
+});
+
+export const SERVER_GIFT_CATALOG = Object.freeze({
+  gift_rose: Object.freeze({ giftId: 'gift_rose', name: 'وردة حمراء 🌹', coinsCost: 5 }),
+  gift_heart: Object.freeze({ giftId: 'gift_heart', name: 'قلب نيون 💖', coinsCost: 15 }),
+  gift_crown: Object.freeze({ giftId: 'gift_crown', name: 'تاج الملوك 👑', coinsCost: 50 }),
+  gift_diamond: Object.freeze({ giftId: 'gift_diamond', name: 'ماسة زرقاء 💎', coinsCost: 100 }),
+  gift_car: Object.freeze({ giftId: 'gift_car', name: 'سيارة رياضية 🏎️', coinsCost: 300 }),
+  gift_rocket: Object.freeze({ giftId: 'gift_rocket', name: 'صاروخ الفضاء 🚀', coinsCost: 600 })
+});
+
+export const SERVER_MISSION_CATALOG = Object.freeze({
+  mission_stream: Object.freeze({
+    missionId: 'mission_stream',
+    rewardCoins: 10,
+    requiredActivity: 'STREAM_WATCHED',
+    minCount: 1,
+    description: 'مشاهدة البث المباشر'
+  }),
+  mission_matches: Object.freeze({
+    missionId: 'mission_matches',
+    rewardCoins: 10,
+    requiredActivity: 'MATCH_COMPLETED',
+    minCount: 1,
+    description: 'إجراء مطابقة عشوائية'
+  }),
+  mission_gifts: Object.freeze({
+    missionId: 'mission_gifts',
+    rewardCoins: 5,
+    requiredActivity: 'GIFT_SENT',
+    minCount: 1,
+    description: 'إرسال هدية تشجيعية'
+  })
+});
+
+export const DEFAULT_ECONOMY_CONFIG = Object.freeze({
+  hostCommissionPercent: 50,
+  agentCommissionPercent: 20,
+  platformCommissionPercent: 30,
+  minPlatformPercent: MIN_PLATFORM_PERCENT,
+  coinsPerUsd: COINS_PER_USD,
+  minPayoutCoins: MIN_PAYOUT_COINS,
+  payoutHoldHours: PAYOUT_HOLD_HOURS,
+  dailyFreeRewardCapCoins: DAILY_FREE_REWARD_CAP_COINS
+});
 
 function generateReferralCode(uid) {
   const hash = crypto.createHash('sha256').update(String(uid)).digest('hex').slice(0, 6).toUpperCase();
   return `AYER-${hash}`;
 }
 
+function hashDeviceId(deviceId) {
+  const raw = String(deviceId || '').trim();
+  if (!raw) return null;
+  return crypto.createHash('sha256').update(raw, 'utf8').digest('hex');
+}
+
+export function normalizeDigits(input) {
+  return String(input || '').replace(/[٠-٩]/g, (ch) => String(ch.charCodeAt(0) - 0x0660)).replace(/[۰-۹]/g, (ch) => String(ch.charCodeAt(0) - 0x06F0));
+}
+
+export function computeExactAgeFromDob(dobInput, nowMs = Date.now()) {
+  const normalized = normalizeDigits(String(dobInput || '').trim());
+  const match = normalized.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) {
+    throw new CallEngineError('INVALID_DOB', 'يرجى إدخال تاريخ الميلاد بصيغة صحيحة (YYYY-MM-DD)', 400);
+  }
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  if (year < 1900 || month < 1 || month > 12 || day < 1 || day > 31) {
+    throw new CallEngineError('INVALID_DOB', 'تاريخ الميلاد المدخل غير صالح.', 400);
+  }
+  const dobDate = new Date(Date.UTC(year, month - 1, day, 0, 0, 0, 0));
+  if (
+    dobDate.getUTCFullYear() !== year ||
+    dobDate.getUTCMonth() !== month - 1 ||
+    dobDate.getUTCDate() !== day
+  ) {
+    throw new CallEngineError('INVALID_DOB', 'اليوم غير مطابق للشهر المحدد.', 400);
+  }
+  if (dobDate.getTime() > nowMs) {
+    throw new CallEngineError('INVALID_DOB', 'لا يمكن أن يكون تاريخ الميلاد في المستقبل.', 400);
+  }
+  const nowDate = new Date(nowMs);
+  let ageYears = nowDate.getUTCFullYear() - year;
+  const nowMonth = nowDate.getUTCMonth() + 1;
+  const nowDay = nowDate.getUTCDate();
+  if (nowMonth < month || (nowMonth === month && nowDay < day)) {
+    ageYears -= 1;
+  }
+  return {
+    normalizedDob: normalized,
+    ageYears,
+    isAdult: ageYears >= 18
+  };
+}
+
+const VALID_USER_STATUSES = new Set(['ACTIVE', 'SUSPENDED', 'BANNED']);
+const VALID_ADMIN_ROLES = new Set(['NONE', 'SUPER_ADMIN', 'FINANCE_ADMIN', 'MODERATION_ADMIN', 'AGENCY_MANAGER']);
+
+function resolveAdminRoleSync(rawRole, isAdminFlag = false) {
+  const upper = String(rawRole || '').trim().toUpperCase();
+  if (VALID_ADMIN_ROLES.has(upper) && upper !== 'NONE') return upper;
+  if (upper === 'NONE' && rawRole !== undefined && rawRole !== null && !isAdminFlag) return 'NONE';
+  return isAdminFlag ? 'SUPER_ADMIN' : 'NONE';
+}
+
+export function assertAccountActive(user) {
+  if (!user) {
+    throw new CallEngineError('USER_NOT_FOUND', 'الحساب غير موجود', 404);
+  }
+  if (user.deletedAt) {
+    throw new CallEngineError('ACCOUNT_DELETED', 'هذا الحساب محذوف', 403);
+  }
+  if (user.status === 'BANNED') {
+    throw new CallEngineError('ACCOUNT_BANNED', 'تم حظر هذا الحساب نهائياً لمخالفة سياسات المنصة.', 403, {
+      status: 'BANNED',
+      reason: user.statusReason || null
+    });
+  }
+  if (user.status === 'SUSPENDED') {
+    throw new CallEngineError('ACCOUNT_SUSPENDED', 'تم إيقاف هذا الحساب مؤقتاً من قِبل الإدارة.', 403, {
+      status: 'SUSPENDED',
+      reason: user.statusReason || null
+    });
+  }
+}
+
+export function assertAdultVerified(user) {
+  assertAccountActive(user);
+  if (user.underageLocked) {
+    throw new CallEngineError('UNDERAGE_LOCKED', 'تم قفل هذا الحساب لعدم استيفاء الحد الأدنى للعمر (+18 سنة).', 403);
+  }
+  if (!user.ageVerified && !user.isAdmin) {
+    throw new CallEngineError('AGE_VERIFICATION_REQUIRED', 'يلزم توثيق العمر (+18) واعتماده قبل استخدام هذه الميزة.', 403);
+  }
+}
+
+function validateAndResolveGift({ giftId, coinsCost }) {
+  const cleanGiftId = String(giftId || '').trim();
+  const item = SERVER_GIFT_CATALOG[cleanGiftId];
+  if (!item) {
+    throw new CallEngineError('UNKNOWN_GIFT_ID', 'معرف الهدية غير معتمد في كتالوج الخادم', 400);
+  }
+  if (coinsCost !== undefined && coinsCost !== null && Number(coinsCost) !== item.coinsCost) {
+    throw new CallEngineError('GIFT_PRICE_MISMATCH', 'سعر الهدية لا يطابق السعر الرسمي المعتمد على الخادم', 400, {
+      expectedCoinsCost: item.coinsCost,
+      receivedCoinsCost: Number(coinsCost)
+    });
+  }
+  return item;
+}
+
+function validateCommissionPair(hostPct, agentPct) {
+  const h = Number(hostPct);
+  const a = Number(agentPct);
+  if (!Number.isInteger(h) || h < 10 || h > 75) {
+    throw new CallEngineError('INVALID_COMMISSION', 'نسبة عمولة المضيف يجب أن تكون بين 10% و 75%', 400);
+  }
+  if (!Number.isInteger(a) || a < 5 || a > 50) {
+    throw new CallEngineError('INVALID_COMMISSION', 'نسبة عمولة الوكيل يجب أن تكون بين 5% و 50%', 400);
+  }
+  if (h + a > 100 - MIN_PLATFORM_PERCENT) {
+    throw new CallEngineError(
+      'INVALID_COMMISSION_SPLIT',
+      `مجموع عمولة المضيف والوكيل (${h + a}%) يتجاوز الحد الأقصى المسموح (${100 - MIN_PLATFORM_PERCENT}%) لضمان حصة المنصة (${MIN_PLATFORM_PERCENT}% على الأقل).`,
+      400
+    );
+  }
+  return {
+    hostCommissionPercent: h,
+    agentCommissionPercent: a,
+    platformCommissionPercent: 100 - h - a
+  };
+}
+
+function computeRevenueSplit({ cost, hostCommissionPercent, agentCommissionPercent, hasAgent }) {
+  const safeHostPct = Math.max(10, Math.min(75, Number(hostCommissionPercent || 50)));
+  const maxAgentPct = Math.max(0, 100 - MIN_PLATFORM_PERCENT - safeHostPct);
+  const safeAgentPct = hasAgent ? Math.max(0, Math.min(maxAgentPct, Math.min(50, Number(agentCommissionPercent || 20)))) : 0;
+
+  const hostShare = Math.floor((cost * safeHostPct) / 100);
+  const agentShare = hasAgent ? Math.floor((cost * safeAgentPct) / 100) : 0;
+  const platformShare = cost - hostShare - agentShare;
+  return { hostShare, agentShare, platformShare };
+}
+
+function sanitizeSpendDescription(entryType, rawDescription) {
+  const base = SPEND_DESCRIPTIONS[entryType] || 'خصم نقاط';
+  const suffix = String(rawDescription || '').replace(/[\r\n\t]+/g, ' ').trim().slice(0, 60);
+  return suffix ? `${base} — ${suffix}` : base;
+}
+
+function createEphemeralKey() {
+  return crypto.randomBytes(32);
+}
+
 export class MemoryLedgerStore {
-  constructor({ nowProvider = () => Date.now() } = {}) {
+  constructor({
+    nowProvider = () => Date.now(),
+    env = process.env,
+    payoutHoldMs = PAYOUT_HOLD_MS,
+    ageVerificationProvider = null
+  } = {}) {
     this.mode = 'memory';
     this.now = nowProvider;
+    this.payoutHoldMs = payoutHoldMs;
+    this.ageVerificationProvider = ageVerificationProvider;
+    this.bankKey = resolveBankEncryptionKey(env, createEphemeralKey());
     this.users = new Map();
     this.wallets = new Map();
     this.ledger = [];
     this.idempotencyKeys = new Set();
+    this.holds = new Map(); // holdId -> hold
+    this.holdIdempotency = new Map(); // idempotencyKey -> holdId
     this.iapTokens = new Map();
     this.agencies = new Map();
     this.agencyMemberships = new Map();
     this.payoutRequests = new Map();
     this.ageVerifications = new Map();
+    this.underageDeviceLocks = new Map(); // deviceHash -> { uid, dobSubmitted, reason, lockedAtMs }
     this.moderationReports = new Map();
+    this.moderationSamples = new Map();
+    this.moderationDailyUsage = new Map(); // dayKey -> { dayKey, sampleCount, estimatedCostUsd }
     this.blocks = new Map(); // blockerUid -> Set<blockedUid>
     this.auditLogs = [];
+    this.economyConfig = { ...DEFAULT_ECONOMY_CONFIG };
+    this.deviceDailyClaims = new Map(); // `${deviceHash}:${dayKey}` -> { lastDailyClaimMs, freeCoinsClaimed }
+    this.userDailyFreeCoins = new Map(); // `${uid}:${dayKey}` -> number
+    this.dailyActivityCounters = new Map(); // `${uid}:${dayKey}:${activityType}` -> number
     this._lockChain = Promise.resolve();
   }
 
@@ -52,9 +284,10 @@ export class MemoryLedgerStore {
     }
     let user = this.users.get(safeUid);
     if (!user) {
+      const isTreasury = safeUid === PLATFORM_TREASURY_UID;
       user = {
         uid: safeUid,
-        displayName: displayName || 'مستخدم Ayer',
+        displayName: isTreasury ? 'خزينة المنصة' : (displayName || 'مستخدم Ayer'),
         email: email || '',
         photoUrl: null,
         bio: '',
@@ -65,12 +298,20 @@ export class MemoryLedgerStore {
         ageYears: 0,
         ageVerified: false,
         ageVerificationStatus: 'UNVERIFIED',
-        isAdmin: false,
+        isAdmin: isTreasury,
+        adminRole: isTreasury ? 'SUPER_ADMIN' : 'NONE',
+        status: 'ACTIVE',
+        statusReason: null,
+        statusUpdatedAtMs: null,
+        statusUpdatedBy: null,
+        underageLocked: false,
+        underageLockedReason: null,
+        underageLockedAtMs: null,
         isAgent: false,
         isHost: false,
         hostStatus: 'NONE',
-        agentCommissionPercent: 20,
-        hostCommissionPercent: 50,
+        agentCommissionPercent: this.economyConfig.agentCommissionPercent,
+        hostCommissionPercent: this.economyConfig.hostCommissionPercent,
         agencyId: '',
         agencyName: '',
         referralCode: generateReferralCode(safeUid),
@@ -93,9 +334,11 @@ export class MemoryLedgerStore {
         uid: safeUid,
         pointsBalance: 0,
         debtCoins: 0,
+        heldCoins: 0,
         hostEarningsCoins: 0,
         subAgentsEarningsCoins: 0,
         reservedPayoutCoins: 0,
+        platformRevenueCoins: 0,
         totalAccumulatedPoints: 0,
         totalPointsSpent: 0,
         lastDailyClaimMs: 0,
@@ -139,9 +382,110 @@ export class MemoryLedgerStore {
     });
   }
 
+  _creditPlatformRevenueSync({ amount, idempotencyKey, referenceId = null, description, metadata = {} }) {
+    if (amount <= 0) return null;
+    const { wallet: platWallet } = this._ensureUserSync({ uid: PLATFORM_TREASURY_UID });
+    platWallet.platformRevenueCoins += amount;
+    platWallet.updatedAtMs = this.now();
+    return this._appendLedgerSync({
+      uid: PLATFORM_TREASURY_UID,
+      entryType: 'PLATFORM_REVENUE',
+      bucket: 'PLATFORM_REVENUE',
+      delta: amount,
+      balanceAfter: platWallet.platformRevenueCoins,
+      idempotencyKey,
+      referenceId,
+      description,
+      metadata
+    });
+  }
+
+  _recordActivitySync({ uid, activityType, count = 1 }) {
+    const dayKey = new Date(this.now()).toISOString().slice(0, 10);
+    const key = `${uid}:${dayKey}:${activityType}`;
+    const next = (this.dailyActivityCounters.get(key) || 0) + Number(count || 1);
+    this.dailyActivityCounters.set(key, next);
+    return next;
+  }
+
+  _publicPayoutView(reqItem) {
+    const masked = reqItem.ibanMasked || maskAccountNumber(reqItem.ibanOrAccount);
+    return {
+      id: reqItem.id,
+      uid: reqItem.uid,
+      displayName: reqItem.displayName,
+      amountCoins: reqItem.amountCoins,
+      usdEquivalentCents: reqItem.usdEquivalentCents,
+      payoutMethod: reqItem.payoutMethod,
+      bankAccountHolder: reqItem.bankAccountHolder,
+      bankName: reqItem.bankName,
+      ibanOrAccount: masked,
+      ibanMasked: masked,
+      fromSubAgentsCoins: reqItem.fromSubAgentsCoins,
+      fromHostCoins: reqItem.fromHostCoins,
+      earliestReviewAtMs: reqItem.earliestReviewAtMs,
+      status: reqItem.status,
+      reviewerUid: reqItem.reviewerUid,
+      reviewerNote: reqItem.reviewerNote,
+      paymentReference: reqItem.paymentReference,
+      createdAtMs: reqItem.createdAtMs,
+      reviewedAtMs: reqItem.reviewedAtMs
+    };
+  }
+
+  async recordServerActivity({ uid, activityType, count = 1 }) {
+    return this._withLock(() => {
+      this._ensureUserSync({ uid });
+      const totalToday = this._recordActivitySync({ uid, activityType, count });
+      return { uid, activityType, countToday: totalToday };
+    });
+  }
+
+  async getEconomyConfig() {
+    return this._withLock(() => ({ ...this.economyConfig }));
+  }
+
+  async updateEconomyConfig({ reviewerUid, hostCommissionPercent, agentCommissionPercent }) {
+    return this._withLock(() => {
+      const nextHost = hostCommissionPercent !== undefined ? hostCommissionPercent : this.economyConfig.hostCommissionPercent;
+      const nextAgent = agentCommissionPercent !== undefined ? agentCommissionPercent : this.economyConfig.agentCommissionPercent;
+      const split = validateCommissionPair(nextHost, nextAgent);
+      this.economyConfig = {
+        ...this.economyConfig,
+        ...split
+      };
+      this._auditSync({
+        actorUid: reviewerUid,
+        action: 'UPDATE_ECONOMY_CONFIG',
+        targetId: 'economy_config',
+        details: split
+      });
+      return { ...this.economyConfig };
+    });
+  }
+
   async ensureUser(input) {
     return this._withLock(() => {
       const { user, wallet } = this._ensureUserSync(input);
+      return { user: { ...user }, wallet: { ...wallet } };
+    });
+  }
+
+  async getUserGateState(uid) {
+    return this._withLock(() => {
+      const { user, wallet } = this._ensureUserSync({ uid });
+      return { user: { ...user }, wallet: { ...wallet } };
+    });
+  }
+
+  async assertUserCanOperate(uid, { requireAgeVerified = true } = {}) {
+    return this._withLock(() => {
+      const { user, wallet } = this._ensureUserSync({ uid });
+      if (requireAgeVerified) {
+        assertAdultVerified(user);
+      } else {
+        assertAccountActive(user);
+      }
       return { user: { ...user }, wallet: { ...wallet } };
     });
   }
@@ -222,9 +566,7 @@ export class MemoryLedgerStore {
       }
 
       const { user, wallet } = this._ensureUserSync({ uid, displayName, email });
-      if (user.deletedAt) {
-        throw new CallEngineError('ACCOUNT_DELETED', 'هذا الحساب محذوف', 403);
-      }
+      assertAccountActive(user);
 
       const nowMs = this.now();
       this.iapTokens.set(purchaseToken, {
@@ -246,7 +588,6 @@ export class MemoryLedgerStore {
         verifiedAtMs: nowMs
       });
 
-      // Settle existing debt first
       const currentDebt = wallet.debtCoins || 0;
       const debtSettled = Math.min(currentDebt, coins);
       const coinsToCredit = coins - debtSettled;
@@ -302,8 +643,207 @@ export class MemoryLedgerStore {
     });
   }
 
+  async holdCoins({ uid, amount, purpose = 'MATCH_HOLD', referenceId = null, idempotencyKey }) {
+    return this._withLock(() => {
+      const holdAmount = Number(amount);
+      if (!Number.isInteger(holdAmount) || holdAmount <= 0) {
+        throw new CallEngineError('INVALID_AMOUNT', 'قيمة الحجز يجب أن تكون عدداً صحيحاً موجباً', 400);
+      }
+      const key = String(idempotencyKey || `hold_${uid}_${crypto.randomUUID()}`);
+      const existingHoldId = this.holdIdempotency.get(key);
+      if (existingHoldId && this.holds.has(existingHoldId)) {
+        const existingHold = this.holds.get(existingHoldId);
+        const { wallet } = this._ensureUserSync({ uid: existingHold.uid });
+        return { hold: { ...existingHold }, wallet: { ...wallet }, duplicate: true };
+      }
+
+      const { user, wallet } = this._ensureUserSync({ uid });
+      assertAdultVerified(user);
+      if ((wallet.debtCoins || 0) > 0) {
+        throw new CallEngineError('ACCOUNT_HAS_DEBT', 'لا يمكن حجز النقاط لوجود مديونية مستردات على الحساب.', 403, {
+          debtCoins: wallet.debtCoins
+        });
+      }
+      if (wallet.pointsBalance < holdAmount) {
+        throw new CallEngineError('INSUFFICIENT_COINS', 'رصيد النقاط غير كافٍ لحجز العملية', 402, {
+          balance: wallet.pointsBalance,
+          required: holdAmount
+        });
+      }
+
+      const nowMs = this.now();
+      wallet.pointsBalance -= holdAmount;
+      wallet.heldCoins += holdAmount;
+      wallet.updatedAtMs = nowMs;
+
+      const holdId = `hold_${crypto.randomUUID()}`;
+      const hold = {
+        holdId,
+        uid,
+        purpose: String(purpose || 'MATCH_HOLD'),
+        referenceId,
+        amountCoins: holdAmount,
+        capturedCoins: 0,
+        releasedCoins: 0,
+        status: 'ACTIVE',
+        idempotencyKey: key,
+        createdAtMs: nowMs,
+        settledAtMs: null
+      };
+      this.holds.set(holdId, hold);
+      this.holdIdempotency.set(key, holdId);
+
+      this._appendLedgerSync({
+        uid,
+        entryType: 'HOLD_RESERVE',
+        bucket: 'POINTS',
+        delta: -holdAmount,
+        balanceAfter: wallet.pointsBalance,
+        idempotencyKey: `hold_res_${key}`,
+        referenceId: holdId,
+        description: `حجز مؤقت (${purpose}) (-${holdAmount} نقطة)`,
+        metadata: { holdId, purpose, referenceId }
+      });
+
+      return { hold: { ...hold }, wallet: { ...wallet }, duplicate: false };
+    });
+  }
+
+  async captureHold({
+    holdId,
+    captureAmount = null,
+    entryType = 'MATCH_SPEND',
+    description = null,
+    creditPlatformRevenue = true,
+    idempotencyKey = null
+  }) {
+    return this._withLock(() => {
+      const hold = this.holds.get(holdId);
+      if (!hold) {
+        throw new CallEngineError('HOLD_NOT_FOUND', 'سجل الحجز غير موجود', 404);
+      }
+      const capKey = String(idempotencyKey || `capture_${holdId}`);
+      if (hold.status !== 'ACTIVE') {
+        if (hold.status === 'CAPTURED' && this.idempotencyKeys.has(`cap_mark_${capKey}`)) {
+          const { wallet } = this._ensureUserSync({ uid: hold.uid });
+          return { hold: { ...hold }, wallet: { ...wallet }, duplicate: true };
+        }
+        throw new CallEngineError('HOLD_ALREADY_SETTLED', 'تمت تسوية هذا الحجز مسبقاً', 409);
+      }
+
+      const remaining = hold.amountCoins - hold.capturedCoins - hold.releasedCoins;
+      const toCapture = captureAmount === null || captureAmount === undefined ? remaining : Number(captureAmount);
+      if (!Number.isInteger(toCapture) || toCapture < 0 || toCapture > remaining) {
+        throw new CallEngineError('INVALID_CAPTURE_AMOUNT', 'مبلغ الالتقاط يتجاوز الرصيد المحجوز', 400);
+      }
+      const toRelease = remaining - toCapture;
+
+      const { wallet } = this._ensureUserSync({ uid: hold.uid });
+      if (wallet.heldCoins < remaining) {
+        throw new CallEngineError('HELD_BALANCE_CORRUPT', 'رصيد الحجز غير متطابق', 409);
+      }
+
+      const nowMs = this.now();
+      wallet.heldCoins -= remaining;
+      wallet.pointsBalance += toRelease;
+      wallet.totalPointsSpent += toCapture;
+      wallet.updatedAtMs = nowMs;
+
+      hold.capturedCoins += toCapture;
+      hold.releasedCoins += toRelease;
+      hold.status = 'CAPTURED';
+      hold.settledAtMs = nowMs;
+      this.idempotencyKeys.add(`cap_mark_${capKey}`);
+
+      if (toRelease > 0) {
+        this._appendLedgerSync({
+          uid: hold.uid,
+          entryType: 'HOLD_RELEASE',
+          bucket: 'POINTS',
+          delta: toRelease,
+          balanceAfter: wallet.pointsBalance,
+          idempotencyKey: `${capKey}_rel`,
+          referenceId: holdId,
+          description: `فك جزء غير مستخدم من الحجز (+${toRelease} نقطة)`,
+          metadata: { holdId }
+        });
+      }
+
+      if (toCapture > 0) {
+        this._appendLedgerSync({
+          uid: hold.uid,
+          entryType,
+          bucket: 'HELD_POINTS',
+          delta: -toCapture,
+          balanceAfter: wallet.heldCoins,
+          idempotencyKey: `${capKey}_cap`,
+          referenceId: hold.referenceId || holdId,
+          description: description || `تأكيد خصم محجوز (${toCapture} نقطة)`,
+          metadata: { holdId, purpose: hold.purpose }
+        });
+
+        if (creditPlatformRevenue) {
+          this._creditPlatformRevenueSync({
+            amount: toCapture,
+            idempotencyKey: `${capKey}_plat`,
+            referenceId: hold.referenceId || holdId,
+            description: `إيراد منصة من التزام محجوز (${entryType}) (+${toCapture} نقطة)`,
+            metadata: { uid: hold.uid, holdId, entryType }
+          });
+        }
+      }
+
+      return { hold: { ...hold }, wallet: { ...wallet }, duplicate: false };
+    });
+  }
+
+  async releaseHold({ holdId, reason = 'HOLD_RELEASED', idempotencyKey = null }) {
+    return this._withLock(() => {
+      const hold = this.holds.get(holdId);
+      if (!hold) {
+        throw new CallEngineError('HOLD_NOT_FOUND', 'سجل الحجز غير موجود', 404);
+      }
+      if (hold.status === 'RELEASED') {
+        const { wallet } = this._ensureUserSync({ uid: hold.uid });
+        return { hold: { ...hold }, wallet: { ...wallet }, duplicate: true };
+      }
+      if (hold.status !== 'ACTIVE') {
+        throw new CallEngineError('HOLD_ALREADY_SETTLED', 'لا يمكن فك حجز تم التقاطه مسبقاً', 409);
+      }
+
+      const remaining = hold.amountCoins - hold.capturedCoins - hold.releasedCoins;
+      const { wallet } = this._ensureUserSync({ uid: hold.uid });
+      const nowMs = this.now();
+      wallet.heldCoins = Math.max(0, wallet.heldCoins - remaining);
+      wallet.pointsBalance += remaining;
+      wallet.updatedAtMs = nowMs;
+
+      hold.releasedCoins += remaining;
+      hold.status = 'RELEASED';
+      hold.settledAtMs = nowMs;
+
+      const relKey = String(idempotencyKey || `rel_${holdId}`);
+      this._appendLedgerSync({
+        uid: hold.uid,
+        entryType: 'HOLD_RELEASE',
+        bucket: 'POINTS',
+        delta: remaining,
+        balanceAfter: wallet.pointsBalance,
+        idempotencyKey: relKey,
+        referenceId: holdId,
+        description: `استرجاع حجز غير مستخدم (${reason}) (+${remaining} نقطة)`,
+        metadata: { holdId, reason }
+      });
+
+      return { hold: { ...hold }, wallet: { ...wallet }, duplicate: false };
+    });
+  }
+
   async spendCoins({ uid, amount, entryType = 'MATCH_SPEND', description, idempotencyKey, referenceId = null, metadata = {} }) {
     return this._withLock(() => {
+      if (!ALLOWED_CLIENT_SPEND_ENTRY_TYPES.has(entryType)) {
+        throw new CallEngineError('INVALID_ENTRY_TYPE', 'نوع عملية الخصم غير مسموح به', 400, { entryType });
+      }
       const spendAmount = Number(amount);
       if (!Number.isInteger(spendAmount) || spendAmount <= 0) {
         throw new CallEngineError('INVALID_AMOUNT', 'قيمة الخصم يجب أن تكون عدداً صحيحاً موجباً', 400);
@@ -316,9 +856,7 @@ export class MemoryLedgerStore {
       }
 
       const { user, wallet } = this._ensureUserSync({ uid });
-      if (user.deletedAt) {
-        throw new CallEngineError('ACCOUNT_DELETED', 'هذا الحساب محذوف', 403);
-      }
+      assertAdultVerified(user);
       if ((wallet.debtCoins || 0) > 0) {
         throw new CallEngineError('ACCOUNT_HAS_DEBT', 'لا يمكن استخدام النقاط لوجود مديونية مستردات على الحساب. يرجى سداد المديونية أولاً.', 403, {
           debtCoins: wallet.debtCoins
@@ -335,6 +873,7 @@ export class MemoryLedgerStore {
       wallet.totalPointsSpent += spendAmount;
       wallet.updatedAtMs = this.now();
 
+      const safeDescription = sanitizeSpendDescription(entryType, description);
       const entry = this._appendLedgerSync({
         uid,
         entryType,
@@ -343,29 +882,66 @@ export class MemoryLedgerStore {
         balanceAfter: wallet.pointsBalance,
         idempotencyKey: key,
         referenceId,
-        description: description || `خصم ${spendAmount} نقطة`,
+        description: safeDescription,
         metadata
+      });
+
+      this._creditPlatformRevenueSync({
+        amount: spendAmount,
+        idempotencyKey: `${key}_plat`,
+        referenceId,
+        description: `إيراد منصة (${entryType}) (+${spendAmount} نقطة)`,
+        metadata: { uid, entryType }
       });
 
       return { wallet: { ...wallet }, entry, duplicate: false };
     });
   }
 
-  async claimDailyBonus({ uid }) {
+  async claimDailyBonus({ uid, deviceId = null }) {
     return this._withLock(() => {
-      const { wallet } = this._ensureUserSync({ uid });
+      const { user, wallet } = this._ensureUserSync({ uid });
+      assertAccountActive(user);
       const nowMs = this.now();
       if (wallet.lastDailyClaimMs > 0 && nowMs - wallet.lastDailyClaimMs < DAILY_CLAIM_COOLDOWN_MS) {
         throw new CallEngineError('DAILY_BONUS_COOLDOWN', 'تم استلام المكافأة اليومية بالفعل. حاول بعد 24 ساعة.', 429, {
           nextAvailableAtMs: wallet.lastDailyClaimMs + DAILY_CLAIM_COOLDOWN_MS
         });
       }
+
+      const dayKey = new Date(nowMs).toISOString().slice(0, 10);
+      const deviceHash = hashDeviceId(deviceId);
+      if (deviceHash) {
+        const devRec = this.deviceDailyClaims.get(`${deviceHash}:${dayKey}`) || { lastDailyClaimMs: 0, freeCoinsClaimed: 0 };
+        if (devRec.lastDailyClaimMs > 0 && nowMs - devRec.lastDailyClaimMs < DAILY_CLAIM_COOLDOWN_MS) {
+          throw new CallEngineError('DAILY_BONUS_DEVICE_COOLDOWN', 'تم استلام المكافأة اليومية على هذا الجهاز بالفعل اليوم.', 429, {
+            nextAvailableAtMs: devRec.lastDailyClaimMs + DAILY_CLAIM_COOLDOWN_MS
+          });
+        }
+        if (devRec.freeCoinsClaimed + DAILY_BONUS_COINS > this.economyConfig.dailyFreeRewardCapCoins) {
+          throw new CallEngineError('DAILY_REWARD_CAP_REACHED', 'تم بلوغ الحد الأقصى اليومي للنقاط المجانية على هذا الجهاز.', 429);
+        }
+      }
+
+      const userFreeToday = this.userDailyFreeCoins.get(`${uid}:${dayKey}`) || 0;
+      if (userFreeToday + DAILY_BONUS_COINS > this.economyConfig.dailyFreeRewardCapCoins) {
+        throw new CallEngineError('DAILY_REWARD_CAP_REACHED', 'تم بلوغ الحد الأقصى اليومي للنقاط المجانية لهذا الحساب.', 429);
+      }
+
       wallet.pointsBalance += DAILY_BONUS_COINS;
       wallet.totalAccumulatedPoints += DAILY_BONUS_COINS;
       wallet.lastDailyClaimMs = nowMs;
       wallet.updatedAtMs = nowMs;
 
-      const dayKey = new Date(nowMs).toISOString().slice(0, 10);
+      this.userDailyFreeCoins.set(`${uid}:${dayKey}`, userFreeToday + DAILY_BONUS_COINS);
+      if (deviceHash) {
+        const devRec = this.deviceDailyClaims.get(`${deviceHash}:${dayKey}`) || { lastDailyClaimMs: 0, freeCoinsClaimed: 0 };
+        this.deviceDailyClaims.set(`${deviceHash}:${dayKey}`, {
+          lastDailyClaimMs: nowMs,
+          freeCoinsClaimed: devRec.freeCoinsClaimed + DAILY_BONUS_COINS
+        });
+      }
+
       const entry = this._appendLedgerSync({
         uid,
         entryType: 'DAILY_FREE',
@@ -373,38 +949,61 @@ export class MemoryLedgerStore {
         delta: DAILY_BONUS_COINS,
         balanceAfter: wallet.pointsBalance,
         idempotencyKey: `daily_${uid}_${dayKey}_${nowMs}`,
-        description: `مكافأة الدخول اليومي (+${DAILY_BONUS_COINS} نقطة)`
+        description: `مكافأة الدخول اليومي (+${DAILY_BONUS_COINS} نقطة)`,
+        metadata: { dayKey }
       });
 
       return { wallet: { ...wallet }, entry, creditedCoins: DAILY_BONUS_COINS };
     });
   }
 
-  async claimMissionReward({ uid, missionId }) {
-    const MISSION_REWARD_CATALOG = {
-      mission_stream: 35,
-      mission_chat: 20,
-      mission_matches: 25,
-      mission_gifts: 30,
-      mission_daily_login: 15,
-      daily_milestone: 50
-    };
+  async claimMissionReward({ uid, missionId, deviceId = null }) {
     return this._withLock(() => {
       const cleanId = String(missionId || '').trim();
-      const rewardCoins = MISSION_REWARD_CATALOG[cleanId];
-      if (!rewardCoins) {
-        throw new CallEngineError('INVALID_MISSION', 'معرف المهمة غير صالح', 400);
+      const mission = SERVER_MISSION_CATALOG[cleanId];
+      if (!mission) {
+        throw new CallEngineError('INVALID_MISSION', 'معرف المهمة غير صالح أو غير موثق من الخادم', 400);
       }
       const { user, wallet } = this._ensureUserSync({ uid });
-      if (user.deletedAt) {
-        throw new CallEngineError('ACCOUNT_DELETED', 'هذا الحساب محذوف', 403);
-      }
+      assertAccountActive(user);
+
       const nowMs = this.now();
       const dayKey = new Date(nowMs).toISOString().slice(0, 10);
       const idempotencyKey = `mission_${uid}_${dayKey}_${cleanId}`;
       if (this.idempotencyKeys.has(idempotencyKey)) {
         throw new CallEngineError('MISSION_ALREADY_CLAIMED', 'تم استلام مكافأة هذه المهمة اليوم بالفعل.', 409);
       }
+
+      // A1: Verify authoritative server-side activity occurred today
+      const activityCount = this.dailyActivityCounters.get(`${uid}:${dayKey}:${mission.requiredActivity}`) || 0;
+      if (activityCount < mission.minCount) {
+        throw new CallEngineError(
+          'MISSION_NOT_VERIFIED',
+          `لم يتم تسجيل نشاط فعلي كافٍ على الخادم لإكمال مهمة (${mission.description}).`,
+          403,
+          { requiredActivity: mission.requiredActivity, recordedCount: activityCount }
+        );
+      }
+
+      const rewardCoins = mission.rewardCoins;
+      const userFreeToday = this.userDailyFreeCoins.get(`${uid}:${dayKey}`) || 0;
+      if (userFreeToday + rewardCoins > this.economyConfig.dailyFreeRewardCapCoins) {
+        throw new CallEngineError('DAILY_REWARD_CAP_REACHED', 'تم بلوغ الحد الأقصى اليومي للنقاط المجانية لهذا الحساب.', 429);
+      }
+
+      const deviceHash = hashDeviceId(deviceId);
+      if (deviceHash) {
+        const devRec = this.deviceDailyClaims.get(`${deviceHash}:${dayKey}`) || { lastDailyClaimMs: 0, freeCoinsClaimed: 0 };
+        if (devRec.freeCoinsClaimed + rewardCoins > this.economyConfig.dailyFreeRewardCapCoins) {
+          throw new CallEngineError('DAILY_REWARD_CAP_REACHED', 'تم بلوغ الحد الأقصى اليومي للنقاط المجانية على هذا الجهاز.', 429);
+        }
+        this.deviceDailyClaims.set(`${deviceHash}:${dayKey}`, {
+          ...devRec,
+          freeCoinsClaimed: devRec.freeCoinsClaimed + rewardCoins
+        });
+      }
+
+      this.userDailyFreeCoins.set(`${uid}:${dayKey}`, userFreeToday + rewardCoins);
 
       wallet.pointsBalance += rewardCoins;
       wallet.totalAccumulatedPoints += rewardCoins;
@@ -418,7 +1017,8 @@ export class MemoryLedgerStore {
         balanceAfter: wallet.pointsBalance,
         idempotencyKey,
         referenceId: cleanId,
-        description: `مكافأة مهمة يومية (${cleanId}) (+${rewardCoins} نقطة)`
+        description: `مكافأة مهمة يومية موثقة (${cleanId}) (+${rewardCoins} نقطة)`,
+        metadata: { dayKey, missionId: cleanId }
       });
 
       return { wallet: { ...wallet }, entry, creditedCoins: rewardCoins };
@@ -428,9 +1028,7 @@ export class MemoryLedgerStore {
   async applyForHost({ uid, agencyName = '' }) {
     return this._withLock(() => {
       const { user } = this._ensureUserSync({ uid });
-      if (user.deletedAt) {
-        throw new CallEngineError('ACCOUNT_DELETED', 'هذا الحساب محذوف', 403);
-      }
+      assertAdultVerified(user);
       if (!user.isHost && user.hostStatus !== 'APPROVED') {
         user.hostStatus = 'PENDING';
       }
@@ -448,42 +1046,54 @@ export class MemoryLedgerStore {
     });
   }
 
-  async sendGiftAtomic({ senderUid, recipientUid, giftId, giftName, coinsCost, idempotencyKey, streamId = null }) {
+  async sendGiftAtomic({ senderUid, recipientUid, giftId, giftName = null, coinsCost = null, idempotencyKey, streamId = null }) {
     return this._withLock(() => {
-      const cost = Number(coinsCost);
-      if (!Number.isInteger(cost) || cost <= 0) {
-        throw new CallEngineError('INVALID_GIFT_COST', 'تكلفة الهدية غير صالحة', 400);
-      }
       if (!recipientUid || senderUid === recipientUid) {
         throw new CallEngineError('INVALID_RECIPIENT', 'لا يمكن إرسال الهدية لهذا المستلم', 400);
       }
-      const key = String(idempotencyKey || `gift_${senderUid}_${crypto.randomUUID()}`);
-      if (this.idempotencyKeys.has(key)) {
-        const { wallet } = this._ensureUserSync({ uid: senderUid });
-        return { senderWallet: { ...wallet }, duplicate: true };
-      }
 
       const sender = this._ensureUserSync({ uid: senderUid });
-      const recipient = this._ensureUserSync({ uid: recipientUid });
-
+      assertAdultVerified(sender.user);
       if ((sender.wallet.debtCoins || 0) > 0) {
         throw new CallEngineError('ACCOUNT_HAS_DEBT', 'لا يمكن إرسال الهدايا لوجود مديونية مستردات على الحساب.', 403, {
           debtCoins: sender.wallet.debtCoins
         });
       }
 
+      const catalogGift = validateAndResolveGift({ giftId, coinsCost });
+      const cost = catalogGift.coinsCost;
+      const authoritativeGiftName = catalogGift.name;
+
+      const key = String(idempotencyKey || `gift_${senderUid}_${crypto.randomUUID()}`);
+      if (this.idempotencyKeys.has(key)) {
+        const { wallet } = this._ensureUserSync({ uid: senderUid });
+        return { senderWallet: { ...wallet }, duplicate: true, coinsCost: cost };
+      }
+
+      const recipient = this._ensureUserSync({ uid: recipientUid });
+
       if (sender.wallet.pointsBalance < cost) {
         throw new CallEngineError('INSUFFICIENT_COINS', 'رصيد النقاط غير كافٍ لإرسال هذه الهدية', 402);
       }
 
+      const membership = this.agencyMemberships.get(recipientUid);
+      const hasAgent = Boolean(membership?.parentAgentUid && this.users.has(membership.parentAgentUid));
+      const agent = hasAgent ? this._ensureUserSync({ uid: membership.parentAgentUid }) : null;
+
+      const { hostShare, agentShare, platformShare } = computeRevenueSplit({
+        cost,
+        hostCommissionPercent: recipient.user.hostCommissionPercent || this.economyConfig.hostCommissionPercent,
+        agentCommissionPercent: agent ? (agent.user.agentCommissionPercent || this.economyConfig.agentCommissionPercent) : 0,
+        hasAgent
+      });
+
+      const nowMs = this.now();
       sender.wallet.pointsBalance -= cost;
       sender.wallet.totalPointsSpent += cost;
-      sender.wallet.updatedAtMs = this.now();
+      sender.wallet.updatedAtMs = nowMs;
 
-      const hostSharePct = Math.max(10, Math.min(80, recipient.user.hostCommissionPercent || 50));
-      const hostShare = Math.floor((cost * hostSharePct) / 100);
       recipient.wallet.hostEarningsCoins += hostShare;
-      recipient.wallet.updatedAtMs = this.now();
+      recipient.wallet.updatedAtMs = nowMs;
 
       const spendEntry = this._appendLedgerSync({
         uid: senderUid,
@@ -493,8 +1103,8 @@ export class MemoryLedgerStore {
         balanceAfter: sender.wallet.pointsBalance,
         idempotencyKey: key,
         referenceId: streamId || recipientUid,
-        description: `إرسال هدية ${giftName || giftId} (-${cost} نقطة)`,
-        metadata: { recipientUid, giftId, streamId }
+        description: `إرسال هدية ${authoritativeGiftName} (-${cost} نقطة)`,
+        metadata: { recipientUid, giftId: catalogGift.giftId, streamId }
       });
 
       this._appendLedgerSync({
@@ -505,74 +1115,163 @@ export class MemoryLedgerStore {
         balanceAfter: recipient.wallet.hostEarningsCoins,
         idempotencyKey: `${key}_rx`,
         referenceId: streamId || senderUid,
-        description: `أرباح هدية ${giftName || giftId} (+${hostShare} نقطة أرباح)`,
-        metadata: { senderUid, giftId, streamId }
+        description: `أرباح هدية ${authoritativeGiftName} (+${hostShare} نقطة أرباح)`,
+        metadata: { senderUid, giftId: catalogGift.giftId, streamId }
       });
 
-      const membership = this.agencyMemberships.get(recipientUid);
-      let agentShare = 0;
-      if (membership?.parentAgentUid && this.users.has(membership.parentAgentUid)) {
-        const agent = this._ensureUserSync({ uid: membership.parentAgentUid });
-        const agentPct = Math.max(1, Math.min(50, agent.user.agentCommissionPercent || 20));
-        agentShare = Math.floor((cost * agentPct) / 100);
-        if (agentShare > 0) {
-          agent.wallet.subAgentsEarningsCoins += agentShare;
-          agent.wallet.updatedAtMs = this.now();
-          this._appendLedgerSync({
-            uid: agent.user.uid,
-            entryType: 'AGENT_COMMISSION',
-            bucket: 'AGENCY_EARNINGS',
-            delta: agentShare,
-            balanceAfter: agent.wallet.subAgentsEarningsCoins,
-            idempotencyKey: `${key}_ag`,
-            referenceId: recipientUid,
-            description: `عمولة وكالة على هدية مضيف (+${agentShare} نقطة)`,
-            metadata: { hostUid: recipientUid, giftId }
-          });
-        }
+      if (agent && agentShare > 0) {
+        agent.wallet.subAgentsEarningsCoins += agentShare;
+        agent.wallet.updatedAtMs = nowMs;
+        this._appendLedgerSync({
+          uid: agent.user.uid,
+          entryType: 'AGENT_COMMISSION',
+          bucket: 'AGENCY_EARNINGS',
+          delta: agentShare,
+          balanceAfter: agent.wallet.subAgentsEarningsCoins,
+          idempotencyKey: `${key}_ag`,
+          referenceId: recipientUid,
+          description: `عمولة وكالة على هدية مضيف (+${agentShare} نقطة)`,
+          metadata: { hostUid: recipientUid, giftId: catalogGift.giftId }
+        });
       }
+
+      if (platformShare > 0) {
+        this._creditPlatformRevenueSync({
+          amount: platformShare,
+          idempotencyKey: `${key}_plat`,
+          referenceId: streamId || recipientUid,
+          description: `حصة المنصة من هدية ${authoritativeGiftName} (+${platformShare} نقطة)`,
+          metadata: { senderUid, recipientUid, giftId: catalogGift.giftId }
+        });
+      }
+
+      // Record server-side gift activity for A1 missions
+      this._recordActivitySync({ uid: senderUid, activityType: 'GIFT_SENT', count: 1 });
 
       return {
         senderWallet: { ...sender.wallet },
         recipientEarningsAdded: hostShare,
         agentCommissionAdded: agentShare,
+        platformRevenueAdded: platformShare,
+        coinsCost: cost,
+        giftName: authoritativeGiftName,
         entry: spendEntry,
         duplicate: false
       };
     });
   }
 
-  async submitAgeVerification({ uid, displayName = '', email = '', dob, ageYears, acceptedTermsAt, acceptedPrivacyAt }) {
-    return this._withLock(() => {
-      if (!dob || Number(ageYears) < 18) {
-        throw new CallEngineError('UNDERAGE_FORBIDDEN', 'التطبيق مخصص للبالغين (+18) فقط', 403);
+  async submitAgeVerification({ uid, displayName = '', email = '', dob, acceptedTermsAt, acceptedPrivacyAt, deviceId = null }) {
+    const nowMs = this.now();
+    const deviceHash = hashDeviceId(deviceId);
+
+    const preCheck = await this._withLock(() => {
+      const { user } = this._ensureUserSync({ uid, displayName, email });
+      assertAccountActive(user);
+      if (user.underageLocked || (deviceHash && this.underageDeviceLocks.has(deviceHash))) {
+        throw new CallEngineError(
+          'UNDERAGE_LOCKED',
+          'عذراً، هذا الحساب أو الجهاز مقيد نهائياً لعدم استيفاء شرط العمر (+18 سنة).',
+          403
+        );
+      }
+      const ageCheck = computeExactAgeFromDob(dob, nowMs);
+      if (!ageCheck.isAdult) {
+        user.underageLocked = true;
+        user.underageLockedReason = 'UNDERAGE_SUBMISSION';
+        user.underageLockedAtMs = nowMs;
+        user.ageVerified = false;
+        user.ageVerificationStatus = 'REJECTED_UNDERAGE';
+        user.dob = ageCheck.normalizedDob;
+        user.ageYears = ageCheck.ageYears;
+        user.updatedAtMs = nowMs;
+
+        if (deviceHash) {
+          this.underageDeviceLocks.set(deviceHash, {
+            uid,
+            dobSubmitted: ageCheck.normalizedDob,
+            reason: 'UNDERAGE_SUBMISSION',
+            lockedAtMs: nowMs
+          });
+        }
+        this.ageVerifications.set(uid, {
+          uid,
+          displayName: user.displayName,
+          email: user.email,
+          dob: ageCheck.normalizedDob,
+          ageYears: ageCheck.ageYears,
+          status: 'REJECTED_UNDERAGE',
+          reviewerUid: 'system_age_gate',
+          rejectionReason: 'العمر المحسوب أقل من 18 عاماً',
+          acceptedTermsAt: Number(acceptedTermsAt || nowMs),
+          acceptedPrivacyAt: Number(acceptedPrivacyAt || nowMs),
+          submittedAtMs: nowMs,
+          reviewedAtMs: nowMs
+        });
+        this._auditSync({
+          actorUid: uid,
+          action: 'UNDERAGE_ATTEMPT_LOCKED',
+          targetId: uid,
+          details: { dob: ageCheck.normalizedDob, ageYears: ageCheck.ageYears, deviceLocked: Boolean(deviceHash) }
+        });
+        return { underageLockedNow: true, ageYears: ageCheck.ageYears };
       }
       if (!acceptedTermsAt || !acceptedPrivacyAt) {
         throw new CallEngineError('LEGAL_CONSENT_REQUIRED', 'الموافقة على الشروط وسياسة الخصوصية مطلوبة', 400);
       }
+      return { underageLockedNow: false, ageCheck };
+    });
+
+    if (preCheck.underageLockedNow) {
+      throw new CallEngineError(
+        'UNDERAGE_FORBIDDEN',
+        'التطبيق مخصص للبالغين (+18) فقط. تم تقييد الحساب والجهاز.',
+        403,
+        { underageLocked: true, ageYears: preCheck.ageYears }
+      );
+    }
+
+    const { ageCheck } = preCheck;
+    let providerOutcome = { status: 'PENDING_REVIEW', provider: 'manual_admin_review', rejectionReason: null };
+    if (this.ageVerificationProvider && typeof this.ageVerificationProvider.verify === 'function') {
+      const ext = await this.ageVerificationProvider.verify({
+        uid,
+        dob: ageCheck.normalizedDob,
+        ageYears: ageCheck.ageYears
+      });
+      if (ext?.status) {
+        providerOutcome = {
+          status: String(ext.status).toUpperCase(),
+          provider: ext.provider || 'external_idv',
+          rejectionReason: ext.rejectionReason || null
+        };
+      }
+    }
+
+    return this._withLock(() => {
       const { user } = this._ensureUserSync({ uid, displayName, email });
-      const nowMs = this.now();
-      user.dob = dob;
-      user.ageYears = Number(ageYears);
+      user.dob = ageCheck.normalizedDob;
+      user.ageYears = ageCheck.ageYears;
       user.acceptedTermsAt = Number(acceptedTermsAt);
       user.acceptedPrivacyAt = Number(acceptedPrivacyAt);
-      user.ageVerified = false;
-      user.ageVerificationStatus = 'PENDING_REVIEW';
+      user.ageVerified = providerOutcome.status === 'APPROVED';
+      user.ageVerificationStatus = providerOutcome.status;
       user.updatedAtMs = nowMs;
 
       const submission = {
         uid,
         displayName: user.displayName,
         email: user.email,
-        dob,
-        ageYears: Number(ageYears),
-        status: 'PENDING_REVIEW',
-        reviewerUid: null,
-        rejectionReason: null,
+        dob: ageCheck.normalizedDob,
+        ageYears: ageCheck.ageYears,
+        status: providerOutcome.status,
+        provider: providerOutcome.provider,
+        reviewerUid: providerOutcome.status === 'PENDING_REVIEW' ? null : `provider:${providerOutcome.provider}`,
+        rejectionReason: providerOutcome.rejectionReason,
         acceptedTermsAt: Number(acceptedTermsAt),
         acceptedPrivacyAt: Number(acceptedPrivacyAt),
         submittedAtMs: nowMs,
-        reviewedAtMs: null
+        reviewedAtMs: providerOutcome.status === 'PENDING_REVIEW' ? null : nowMs
       };
       this.ageVerifications.set(uid, submission);
       return { ...submission };
@@ -632,16 +1331,22 @@ export class MemoryLedgerStore {
       }
 
       const { user, wallet } = this._ensureUserSync({ uid });
+      assertAdultVerified(user);
       if ((wallet.debtCoins || 0) > 0) {
         throw new CallEngineError('ACCOUNT_HAS_DEBT', 'لا يمكن طلب سحب الأرباح لوجود مديونية مستردات على الحساب.', 403, {
           debtCoins: wallet.debtCoins
         });
       }
-      if (!user.ageVerified) {
-        throw new CallEngineError('AGE_VERIFICATION_REQUIRED', 'يجب توثيق العمر (+18) قبل تقديم طلب سحب', 403);
-      }
       if (!user.isAgent && !user.isHost) {
         throw new CallEngineError('PAYOUT_ROLE_REQUIRED', 'سحب الأرباح متاح للمضيفين والوكلاء المعتمدين فقط', 403);
+      }
+
+      // A6 Velocity check: max 1 active payout request per user
+      const hasActive = Array.from(this.payoutRequests.values()).some(
+        (r) => r.uid === uid && (r.status === 'PENDING_REVIEW' || r.status === 'APPROVED')
+      );
+      if (hasActive) {
+        throw new CallEngineError('ACTIVE_PAYOUT_EXISTS', 'لديك طلب سحب نشط قيد المراجعة بالفعل. انتظر البت فيه أولاً.', 409);
       }
 
       const availableEarnings = wallet.hostEarningsCoins + wallet.subAgentsEarningsCoins;
@@ -652,17 +1357,21 @@ export class MemoryLedgerStore {
         });
       }
 
-      // Deduct from sub-agent earnings first, then host earnings, and reserve atomically
       let remaining = coins;
       const fromSubAgents = Math.min(wallet.subAgentsEarningsCoins, remaining);
       wallet.subAgentsEarningsCoins -= fromSubAgents;
       remaining -= fromSubAgents;
       wallet.hostEarningsCoins -= remaining;
       wallet.reservedPayoutCoins += coins;
-      wallet.updatedAtMs = this.now();
+      const nowMs = this.now();
+      wallet.updatedAtMs = nowMs;
 
       const reqId = `payout_${crypto.randomUUID()}`;
-      const usdCents = Math.round((coins / 10) * 100);
+      const usdCents = Math.floor((coins * 100) / COINS_PER_USD);
+      const rawIban = String(ibanOrAccount).trim();
+      const masked = maskAccountNumber(rawIban);
+      const encryptedIban = encryptSensitiveField(rawIban, this.bankKey);
+
       const request = {
         id: reqId,
         uid,
@@ -672,14 +1381,16 @@ export class MemoryLedgerStore {
         payoutMethod,
         bankAccountHolder: String(bankAccountHolder).trim(),
         bankName: String(bankName).trim(),
-        ibanOrAccount: String(ibanOrAccount).trim(),
+        ibanOrAccount: encryptedIban,
+        ibanMasked: masked,
         fromSubAgentsCoins: fromSubAgents,
         fromHostCoins: remaining,
+        earliestReviewAtMs: nowMs + this.payoutHoldMs,
         status: 'PENDING_REVIEW',
         reviewerUid: null,
         reviewerNote: null,
         paymentReference: null,
-        createdAtMs: this.now(),
+        createdAtMs: nowMs,
         reviewedAtMs: null
       };
       this.payoutRequests.set(reqId, request);
@@ -699,10 +1410,10 @@ export class MemoryLedgerStore {
         actorUid: uid,
         action: 'CREATE_PAYOUT_REQUEST',
         targetId: reqId,
-        details: { amountCoins: coins, usdEquivalentCents: usdCents }
+        details: { amountCoins: coins, usdEquivalentCents: usdCents, ibanMasked: masked }
       });
 
-      return { request: { ...request }, wallet: { ...wallet } };
+      return { request: this._publicPayoutView(request), wallet: { ...wallet } };
     });
   }
 
@@ -713,7 +1424,7 @@ export class MemoryLedgerStore {
         .filter((r) => (isAdmin || r.uid === uid))
         .filter((r) => !targetStatus || targetStatus === 'ALL' || r.status === targetStatus)
         .sort((a, b) => b.createdAtMs - a.createdAtMs)
-        .map((r) => ({ ...r }));
+        .map((r) => this._publicPayoutView(r));
     });
   }
 
@@ -727,12 +1438,21 @@ export class MemoryLedgerStore {
       if (!reqItem) {
         throw new CallEngineError('PAYOUT_NOT_FOUND', 'طلب السحب غير موجود', 404);
       }
+      if (reviewerUid === reqItem.uid) {
+        throw new CallEngineError('SELF_APPROVAL_FORBIDDEN', 'لا يمكن للمستخدم مراجعة أو اعتماد طلب السحب الخاص به', 403);
+      }
       if (reqItem.status === 'PAID' || reqItem.status === 'REJECTED') {
         throw new CallEngineError('PAYOUT_ALREADY_FINALIZED', 'تم البت في طلب السحب هذا مسبقاً', 409);
       }
 
-      const { wallet } = this._ensureUserSync({ uid: reqItem.uid });
       const nowMs = this.now();
+      if ((normalized === 'APPROVED' || normalized === 'PAID') && nowMs < reqItem.earliestReviewAtMs) {
+        throw new CallEngineError('PAYOUT_HOLD_ACTIVE', 'طلب السحب لا يزال ضمن فترة الحجز الأمني (24 ساعة) قبل الاعتماد أو الصرف.', 409, {
+          earliestReviewAtMs: reqItem.earliestReviewAtMs
+        });
+      }
+
+      const { wallet } = this._ensureUserSync({ uid: reqItem.uid });
 
       if (normalized === 'REJECTED') {
         wallet.reservedPayoutCoins = Math.max(0, wallet.reservedPayoutCoins - reqItem.amountCoins);
@@ -740,16 +1460,30 @@ export class MemoryLedgerStore {
         wallet.hostEarningsCoins += reqItem.fromHostCoins;
         wallet.updatedAtMs = nowMs;
 
-        this._appendLedgerSync({
-          uid: reqItem.uid,
-          entryType: 'WITHDRAWAL_REFUND',
-          bucket: 'HOST_EARNINGS',
-          delta: reqItem.amountCoins,
-          balanceAfter: wallet.hostEarningsCoins + wallet.subAgentsEarningsCoins,
-          idempotencyKey: `payout_refund_${requestId}`,
-          referenceId: requestId,
-          description: `استرداد طلب سحب مرفوض (+${reqItem.amountCoins} نقطة أرباح)`
-        });
+        if (reqItem.fromSubAgentsCoins > 0) {
+          this._appendLedgerSync({
+            uid: reqItem.uid,
+            entryType: 'WITHDRAWAL_REFUND',
+            bucket: 'AGENCY_EARNINGS',
+            delta: reqItem.fromSubAgentsCoins,
+            balanceAfter: wallet.subAgentsEarningsCoins,
+            idempotencyKey: `payout_refund_ag_${requestId}`,
+            referenceId: requestId,
+            description: `استرداد طلب سحب مرفوض إلى أرباح الوكالة (+${reqItem.fromSubAgentsCoins} نقطة)`
+          });
+        }
+        if (reqItem.fromHostCoins > 0) {
+          this._appendLedgerSync({
+            uid: reqItem.uid,
+            entryType: 'WITHDRAWAL_REFUND',
+            bucket: 'HOST_EARNINGS',
+            delta: reqItem.fromHostCoins,
+            balanceAfter: wallet.hostEarningsCoins,
+            idempotencyKey: `payout_refund_host_${requestId}`,
+            referenceId: requestId,
+            description: `استرداد طلب سحب مرفوض إلى أرباح المضيف (+${reqItem.fromHostCoins} نقطة)`
+          });
+        }
       } else if (normalized === 'PAID') {
         wallet.reservedPayoutCoins = Math.max(0, wallet.reservedPayoutCoins - reqItem.amountCoins);
         wallet.updatedAtMs = nowMs;
@@ -779,41 +1513,124 @@ export class MemoryLedgerStore {
         details: { uid: reqItem.uid, amountCoins: reqItem.amountCoins, note, paymentReference }
       });
 
-      return { request: { ...reqItem }, wallet: { ...wallet } };
+      return { request: this._publicPayoutView(reqItem), wallet: { ...wallet } };
+    });
+  }
+
+  async setUserStatus({ reviewerUid, targetUid, status, reason = '' }) {
+    return this._withLock(() => {
+      const normalized = String(status || '').trim().toUpperCase();
+      if (!VALID_USER_STATUSES.has(normalized)) {
+        throw new CallEngineError('INVALID_STATUS', 'الحالة يجب أن تكون ACTIVE أو SUSPENDED أو BANNED', 400);
+      }
+      const { user } = this._ensureUserSync({ uid: targetUid });
+      const nowMs = this.now();
+      const prevStatus = user.status || 'ACTIVE';
+      user.status = normalized;
+      user.statusReason = normalized === 'ACTIVE' ? null : (String(reason || '').trim() || 'إجراء إداري');
+      user.statusUpdatedAtMs = nowMs;
+      user.statusUpdatedBy = reviewerUid;
+      user.updatedAtMs = nowMs;
+
+      this._auditSync({
+        actorUid: reviewerUid,
+        action: 'USER_STATUS_UPDATED',
+        targetId: targetUid,
+        details: { previousStatus: prevStatus, status: normalized, reason: user.statusReason }
+      });
+
+      return { user: { ...user } };
+    });
+  }
+
+  async listHostApplications(status = 'PENDING') {
+    return this._withLock(() => {
+      const target = String(status || 'PENDING').toUpperCase();
+      return Array.from(this.users.values())
+        .filter((u) => !u.deletedAt)
+        .filter((u) => (target === 'ALL' ? u.hostStatus !== 'NONE' : u.hostStatus === target))
+        .sort((a, b) => (b.updatedAtMs || 0) - (a.updatedAtMs || 0))
+        .map((u) => ({ ...u }));
+    });
+  }
+
+  async reviewHostApplication({ reviewerUid, targetUid, decision, hostCommissionPercent = null, reason = null }) {
+    return this._withLock(() => {
+      const normalized = String(decision || '').trim().toUpperCase();
+      if (normalized !== 'APPROVED' && normalized !== 'REJECTED') {
+        throw new CallEngineError('INVALID_DECISION', 'القرار يجب أن يكون APPROVED أو REJECTED', 400);
+      }
+      const { user } = this._ensureUserSync({ uid: targetUid });
+      if (hostCommissionPercent !== null && hostCommissionPercent !== undefined) {
+        validateCommissionPair(hostCommissionPercent, user.agentCommissionPercent);
+        user.hostCommissionPercent = Number(hostCommissionPercent);
+      }
+      user.isHost = normalized === 'APPROVED';
+      user.hostStatus = normalized;
+      user.updatedAtMs = this.now();
+
+      this._auditSync({
+        actorUid: reviewerUid,
+        action: 'REVIEW_HOST_APPLICATION',
+        targetId: targetUid,
+        details: {
+          decision: normalized,
+          hostCommissionPercent: user.hostCommissionPercent,
+          agencyName: user.agencyName,
+          reason: reason || null
+        }
+      });
+
+      return { user: { ...user } };
     });
   }
 
   async adminSetUserRolesAndCommission({
     reviewerUid,
+    reviewerAdminRole = 'SUPER_ADMIN',
     targetUid,
     isAgent,
     isHost,
     isAdmin,
+    adminRole,
     agentCommissionPercent,
     hostCommissionPercent,
     agencyName
   }) {
     return this._withLock(() => {
+      const isModifyingAdminPrivileges = typeof isAdmin === 'boolean' || adminRole !== undefined;
+      if (isModifyingAdminPrivileges && reviewerUid !== 'system_auth_claims' && reviewerAdminRole !== 'SUPER_ADMIN') {
+        throw new CallEngineError(
+          'FORBIDDEN_SUPER_ADMIN_REQUIRED',
+          'تعيين أو تعديل الأدوار الإدارية محصور بالمشرف الأعلى (SUPER_ADMIN) فقط.',
+          403
+        );
+      }
+
       const { user } = this._ensureUserSync({ uid: targetUid });
+      if (agentCommissionPercent !== undefined || hostCommissionPercent !== undefined) {
+        const nextHost = hostCommissionPercent !== undefined ? hostCommissionPercent : user.hostCommissionPercent;
+        const nextAgent = agentCommissionPercent !== undefined ? agentCommissionPercent : user.agentCommissionPercent;
+        validateCommissionPair(nextHost, nextAgent);
+        if (agentCommissionPercent !== undefined) user.agentCommissionPercent = Number(agentCommissionPercent);
+        if (hostCommissionPercent !== undefined) user.hostCommissionPercent = Number(hostCommissionPercent);
+      }
+
       if (typeof isAgent === 'boolean') user.isAgent = isAgent;
       if (typeof isHost === 'boolean') {
         user.isHost = isHost;
         user.hostStatus = isHost ? 'APPROVED' : 'NONE';
       }
-      if (typeof isAdmin === 'boolean') user.isAdmin = isAdmin;
-      if (agentCommissionPercent !== undefined) {
-        const pct = Number(agentCommissionPercent);
-        if (!Number.isInteger(pct) || pct < 5 || pct > 50) {
-          throw new CallEngineError('INVALID_COMMISSION', 'نسبة عمولة الوكيل يجب أن تكون بين 5% و 50%', 400);
+      if (adminRole !== undefined) {
+        const upperRole = String(adminRole || 'NONE').trim().toUpperCase();
+        if (!VALID_ADMIN_ROLES.has(upperRole)) {
+          throw new CallEngineError('INVALID_ADMIN_ROLE', 'الدور الإداري غير معروف', 400);
         }
-        user.agentCommissionPercent = pct;
-      }
-      if (hostCommissionPercent !== undefined) {
-        const pct = Number(hostCommissionPercent);
-        if (!Number.isInteger(pct) || pct < 10 || pct > 80) {
-          throw new CallEngineError('INVALID_COMMISSION', 'نسبة عمولة المضيف يجب أن تكون بين 10% و 80%', 400);
-        }
-        user.hostCommissionPercent = pct;
+        user.adminRole = upperRole;
+        user.isAdmin = upperRole !== 'NONE';
+      } else if (typeof isAdmin === 'boolean') {
+        user.isAdmin = isAdmin;
+        user.adminRole = isAdmin ? (user.adminRole && user.adminRole !== 'NONE' ? user.adminRole : 'SUPER_ADMIN') : 'NONE';
       }
       if (agencyName !== undefined) {
         user.agencyName = String(agencyName).trim();
@@ -843,7 +1660,10 @@ export class MemoryLedgerStore {
           isAgent: user.isAgent,
           isHost: user.isHost,
           isAdmin: user.isAdmin,
-          agentCommissionPercent: user.agentCommissionPercent
+          adminRole: user.adminRole,
+          agentCommissionPercent: user.agentCommissionPercent,
+          hostCommissionPercent: user.hostCommissionPercent,
+          agencyName: user.agencyName
         }
       });
 
@@ -860,7 +1680,7 @@ export class MemoryLedgerStore {
       const payouts = Array.from(this.payoutRequests.values())
         .filter((r) => r.uid === uid)
         .sort((a, b) => b.createdAtMs - a.createdAtMs)
-        .map((r) => ({ ...r }));
+        .map((r) => this._publicPayoutView(r));
       return {
         user: { ...user },
         wallet: { ...wallet },
@@ -939,10 +1759,22 @@ export class MemoryLedgerStore {
       if (!rep) {
         throw new CallEngineError('REPORT_NOT_FOUND', 'البلاغ غير موجود', 404);
       }
+      const nowMs = this.now();
       rep.status = status;
       rep.actionTaken = actionTaken;
       rep.reviewerUid = reviewerUid;
-      rep.reviewedAtMs = this.now();
+      rep.reviewedAtMs = nowMs;
+
+      if (rep.targetUserId && (actionTaken === 'SUSPEND_USER' || actionTaken === 'BAN_USER')) {
+        const targetStatus = actionTaken === 'BAN_USER' ? 'BANNED' : 'SUSPENDED';
+        const { user } = this._ensureUserSync({ uid: rep.targetUserId });
+        user.status = targetStatus;
+        user.statusReason = `بلاغ رقابي: ${rep.reason}`;
+        user.statusUpdatedAtMs = nowMs;
+        user.statusUpdatedBy = reviewerUid;
+        user.updatedAtMs = nowMs;
+      }
+
       this._auditSync({
         actorUid: reviewerUid,
         action: 'RESOLVE_MODERATION_REPORT',
@@ -950,6 +1782,100 @@ export class MemoryLedgerStore {
         details: { status, actionTaken, targetUserId: rep.targetUserId }
       });
       return { ...rep };
+    });
+  }
+
+  async getModerationDailyUsage(dayKey) {
+    return this._withLock(() => {
+      const usage = this.moderationDailyUsage.get(dayKey);
+      return usage ? { ...usage } : { dayKey, sampleCount: 0, estimatedCostUsd: 0 };
+    });
+  }
+
+  async createModerationSample({
+    id,
+    streamId = null,
+    userUid,
+    sampleType = 'STREAM_FRAME',
+    provider = 'heuristic_local',
+    status = 'CLEAN',
+    riskScore = 0,
+    labels = [],
+    estimatedCostUsd = 0,
+    actionTaken = 'NONE',
+    details = '',
+    dayKey = null,
+    incrementUsage = true
+  }) {
+    return this._withLock(() => {
+      const nowMs = this.now();
+      const sample = {
+        id: id || `mod_${crypto.randomUUID()}`,
+        streamId,
+        userUid,
+        sampleType,
+        provider,
+        status,
+        riskScore: Number(riskScore || 0),
+        labels: Array.isArray(labels) ? [...labels] : [],
+        estimatedCostUsd: Number(estimatedCostUsd || 0),
+        actionTaken,
+        reviewerUid: null,
+        details: String(details || ''),
+        createdAtMs: nowMs,
+        reviewedAtMs: null
+      };
+      this.moderationSamples.set(sample.id, sample);
+
+      if (incrementUsage && dayKey) {
+        const prev = this.moderationDailyUsage.get(dayKey) || { dayKey, sampleCount: 0, estimatedCostUsd: 0 };
+        this.moderationDailyUsage.set(dayKey, {
+          dayKey,
+          sampleCount: prev.sampleCount + 1,
+          estimatedCostUsd: Number((prev.estimatedCostUsd + sample.estimatedCostUsd).toFixed(6))
+        });
+      }
+
+      return { ...sample, labels: [...sample.labels] };
+    });
+  }
+
+  async listModerationSamples(status = 'QUEUE') {
+    return this._withLock(() => {
+      const target = String(status || 'QUEUE').toUpperCase();
+      return Array.from(this.moderationSamples.values())
+        .filter((s) => {
+          if (target === 'ALL') return true;
+          if (target === 'QUEUE') return s.status === 'PENDING_MANUAL_REVIEW' || s.status === 'FLAGGED' || s.status === 'BLOCKED';
+          return s.status === target;
+        })
+        .sort((a, b) => b.createdAtMs - a.createdAtMs)
+        .map((s) => ({ ...s, labels: [...(s.labels || [])] }));
+    });
+  }
+
+  async reviewModerationSample({ reviewerUid, sampleId, decision, note = null }) {
+    return this._withLock(() => {
+      const norm = String(decision || '').trim().toUpperCase();
+      if (norm !== 'APPROVED' && norm !== 'CONFIRMED') {
+        throw new CallEngineError('INVALID_DECISION', 'القرار يجب أن يكون APPROVED أو CONFIRMED', 400);
+      }
+      const sample = this.moderationSamples.get(sampleId);
+      if (!sample) {
+        throw new CallEngineError('MODERATION_SAMPLE_NOT_FOUND', 'عينة الفحص غير موجودة', 404);
+      }
+      sample.status = norm === 'APPROVED' ? 'REVIEWED_APPROVED' : 'REVIEWED_CONFIRMED';
+      sample.reviewerUid = reviewerUid;
+      sample.reviewedAtMs = this.now();
+      if (note) sample.details = `${sample.details} | ${note}`.trim();
+
+      this._auditSync({
+        actorUid: reviewerUid,
+        action: 'REVIEW_MODERATION_SAMPLE',
+        targetId: sampleId,
+        details: { decision: norm, streamId: sample.streamId, userUid: sample.userUid, note }
+      });
+      return { ...sample, labels: [...(sample.labels || [])] };
     });
   }
 
@@ -985,11 +1911,27 @@ export class MemoryLedgerStore {
         user.dob = null;
         user.bio = '';
         user.photoUrl = null;
+        user.updatedAtMs = this.now();
       }
       this.ageVerifications.delete(uid);
       this.blocks.delete(uid);
+      for (const blockedSet of this.blocks.values()) {
+        blockedSet.delete(uid);
+      }
       this._auditSync({ actorUid: uid, action: 'ACCOUNT_DELETED', targetId: uid });
       return { deleted: true, uid };
+    });
+  }
+
+  async getAuditLogs({ actorUid = null, action = null, targetId = null, limit = 100 } = {}) {
+    return this._withLock(() => {
+      const safeLimit = Math.max(1, Math.min(500, Number(limit) || 100));
+      return this.auditLogs
+        .filter((log) => (!actorUid || log.actorUid === actorUid))
+        .filter((log) => (!action || log.action === action))
+        .filter((log) => (!targetId || log.targetId === targetId))
+        .slice(0, safeLimit)
+        .map((log) => ({ ...log, details: { ...(log.details || {}) } }));
     });
   }
 
@@ -1064,7 +2006,6 @@ export class MemoryLedgerStore {
         });
       }
 
-      // Check if user gifted hosts, flag their earnings for audit
       const giftEntries = this.ledger.filter(
         (e) => e.uid === tx.uid && e.entryType === 'GIFT_SENT'
       );
@@ -1097,20 +2038,36 @@ export class MemoryLedgerStore {
       };
     });
   }
+
+  async exportReconciliationSnapshot() {
+    return this._withLock(() => ({
+      wallets: Array.from(this.wallets.values()).map((w) => ({ ...w })),
+      ledgerEntries: this.ledger.map((e) => ({ ...e })),
+      holds: Array.from(this.holds.values()).map((h) => ({ ...h })),
+      payoutRequests: Array.from(this.payoutRequests.values()).map((p) => ({ ...p }))
+    }));
+  }
 }
 
 export class PostgresLedgerStore {
-  constructor({ pool, nowProvider = () => Date.now() }) {
+  constructor({
+    pool,
+    nowProvider = () => Date.now(),
+    env = process.env,
+    payoutHoldMs = PAYOUT_HOLD_MS,
+    ageVerificationProvider = null
+  }) {
     this.mode = 'postgres';
     this.pool = pool;
     this.now = nowProvider;
+    this.payoutHoldMs = payoutHoldMs;
+    this.ageVerificationProvider = ageVerificationProvider;
+    this.bankKey = resolveBankEncryptionKey(env, createEphemeralKey());
   }
 
   async init() {
-    const schemaPath = path.join(__dirname, '..', 'sql', 'schema.sql');
-    const sql = fs.readFileSync(schemaPath, 'utf8');
-    await this.pool.query(sql);
-    return { ok: true, mode: this.mode };
+    const migrations = await runMigrations(this.pool);
+    return { ok: true, mode: this.mode, migrations };
   }
 
   async _withTx(fn) {
@@ -1131,14 +2088,22 @@ export class PostgresLedgerStore {
   async _ensureUserTx(client, { uid, displayName = '', email = '' }) {
     const safeUid = String(uid || '').trim();
     if (!safeUid) throw new CallEngineError('INVALID_UID', 'معرف المستخدم مطلوب', 400);
+    const isTreasury = safeUid === PLATFORM_TREASURY_UID;
     await client.query(
-      `INSERT INTO users (uid, display_name, email, referral_code)
-       VALUES ($1, $2, $3, $4)
+      `INSERT INTO users (uid, display_name, email, referral_code, is_admin, admin_role)
+       VALUES ($1, $2, $3, $4, $5, $6)
        ON CONFLICT (uid) DO UPDATE SET
          display_name = CASE WHEN users.display_name = '' THEN EXCLUDED.display_name ELSE users.display_name END,
          email = CASE WHEN users.email = '' THEN EXCLUDED.email ELSE users.email END,
          updated_at = NOW()`,
-      [safeUid, displayName || 'مستخدم Ayer', email || '', generateReferralCode(safeUid)]
+      [
+        safeUid,
+        isTreasury ? 'خزينة المنصة' : (displayName || 'مستخدم Ayer'),
+        email || '',
+        generateReferralCode(safeUid),
+        isTreasury,
+        isTreasury ? 'SUPER_ADMIN' : 'NONE'
+      ]
     );
     await client.query(
       `INSERT INTO wallet_accounts (uid) VALUES ($1) ON CONFLICT (uid) DO NOTHING`,
@@ -1149,7 +2114,59 @@ export class PostgresLedgerStore {
     return { user: this._mapUser(userRes.rows[0]), wallet: this._mapWallet(walletRes.rows[0]) };
   }
 
+  async _getEconomyConfigTx(client) {
+    const res = await client.query(`SELECT * FROM economy_config WHERE id = 1`);
+    if (res.rowCount === 0) return { ...DEFAULT_ECONOMY_CONFIG };
+    const r = res.rows[0];
+    return {
+      hostCommissionPercent: Number(r.host_commission_percent ?? DEFAULT_ECONOMY_CONFIG.hostCommissionPercent),
+      agentCommissionPercent: Number(r.agent_commission_percent ?? DEFAULT_ECONOMY_CONFIG.agentCommissionPercent),
+      platformCommissionPercent: Number(r.platform_commission_percent ?? DEFAULT_ECONOMY_CONFIG.platformCommissionPercent),
+      minPlatformPercent: Number(r.min_platform_percent ?? MIN_PLATFORM_PERCENT),
+      coinsPerUsd: Number(r.coins_per_usd ?? COINS_PER_USD),
+      minPayoutCoins: Number(r.min_payout_coins ?? MIN_PAYOUT_COINS),
+      payoutHoldHours: Number(r.payout_hold_hours ?? PAYOUT_HOLD_HOURS),
+      dailyFreeRewardCapCoins: Number(r.daily_free_reward_cap_coins ?? DAILY_FREE_REWARD_CAP_COINS)
+    };
+  }
+
+  async _creditPlatformRevenueTx(client, { amount, idempotencyKey, referenceId = null, description, metadata = {} }) {
+    if (amount <= 0) return null;
+    await this._ensureUserTx(client, { uid: PLATFORM_TREASURY_UID });
+    const upd = await client.query(
+      `UPDATE wallet_accounts
+       SET platform_revenue_coins = platform_revenue_coins + $1,
+           updated_at = NOW()
+       WHERE uid = $2
+       RETURNING *`,
+      [amount, PLATFORM_TREASURY_UID]
+    );
+    const platBalance = Number(upd.rows[0].platform_revenue_coins);
+    await client.query(
+      `INSERT INTO ledger_entries (entry_uuid, uid, entry_type, bucket, delta, balance_after, idempotency_key, reference_id, description, metadata)
+       VALUES ($1,$2,'PLATFORM_REVENUE','PLATFORM_REVENUE',$3,$4,$5,$6,$7,$8)
+       ON CONFLICT (idempotency_key) DO NOTHING`,
+      [crypto.randomUUID(), PLATFORM_TREASURY_UID, amount, platBalance, idempotencyKey, referenceId, description, JSON.stringify(metadata)]
+    );
+    return platBalance;
+  }
+
+  async _recordActivityTx(client, { uid, activityType, count = 1 }) {
+    const dayKey = new Date(this.now()).toISOString().slice(0, 10);
+    const res = await client.query(
+      `INSERT INTO daily_activity_counters (uid, day_key, activity_type, activity_count)
+       VALUES ($1,$2,$3,$4)
+       ON CONFLICT (uid, day_key, activity_type) DO UPDATE SET
+         activity_count = daily_activity_counters.activity_count + EXCLUDED.activity_count,
+         updated_at = NOW()
+       RETURNING activity_count`,
+      [uid, dayKey, activityType, Number(count || 1)]
+    );
+    return Number(res.rows[0]?.activity_count || count);
+  }
+
   _mapUser(r) {
+    const adminRole = resolveAdminRoleSync(r.admin_role, Boolean(r.is_admin));
     return {
       uid: r.uid,
       displayName: r.display_name,
@@ -1160,19 +2177,28 @@ export class PostgresLedgerStore {
       countryCode: r.country_code,
       gender: r.gender,
       dob: r.dob,
-      ageYears: r.age_years,
-      ageVerified: r.age_verified,
+      ageYears: Number(r.age_years || 0),
+      ageVerified: Boolean(r.age_verified),
       ageVerificationStatus: r.age_verification_status,
-      isAdmin: r.is_admin,
-      isAgent: r.is_agent,
-      isHost: r.is_host,
+      isAdmin: Boolean(r.is_admin) || adminRole !== 'NONE',
+      adminRole,
+      status: r.status || 'ACTIVE',
+      statusReason: r.status_reason || null,
+      statusUpdatedAtMs: r.status_updated_at ? Number(r.status_updated_at) : null,
+      statusUpdatedBy: r.status_updated_by || null,
+      underageLocked: Boolean(r.underage_locked),
+      underageLockedReason: r.underage_locked_reason || null,
+      underageLockedAtMs: r.underage_locked_at ? Number(r.underage_locked_at) : null,
+      isAgent: Boolean(r.is_agent),
+      isHost: Boolean(r.is_host),
       hostStatus: r.host_status,
-      agentCommissionPercent: r.agent_commission_percent,
-      hostCommissionPercent: r.host_commission_percent,
-      agencyId: r.agency_id,
-      referralCode: r.referral_code,
-      profileVisibility: r.profile_visibility,
-      directMessagePermission: r.direct_message_permission,
+      agentCommissionPercent: Number(r.agent_commission_percent ?? 20),
+      hostCommissionPercent: Number(r.host_commission_percent ?? 50),
+      agencyId: r.agency_id || '',
+      agencyName: r.agency_name || '',
+      referralCode: r.referral_code || '',
+      profileVisibility: r.profile_visibility || 'PUBLIC',
+      directMessagePermission: r.direct_message_permission || 'EVERYONE',
       acceptedTermsAt: r.accepted_terms_at ? Number(r.accepted_terms_at) : null,
       acceptedPrivacyAt: r.accepted_privacy_at ? Number(r.accepted_privacy_at) : null,
       deletedAt: r.deleted_at ? Number(r.deleted_at) : null
@@ -1184,12 +2210,30 @@ export class PostgresLedgerStore {
       uid: r.uid,
       pointsBalance: Number(r.points_balance),
       debtCoins: Number(r.debt_coins || 0),
+      heldCoins: Number(r.held_coins || 0),
       hostEarningsCoins: Number(r.host_earnings_coins),
       subAgentsEarningsCoins: Number(r.sub_agents_earnings_coins),
       reservedPayoutCoins: Number(r.reserved_payout_coins),
+      platformRevenueCoins: Number(r.platform_revenue_coins || 0),
       totalAccumulatedPoints: Number(r.total_accumulated_points),
       totalPointsSpent: Number(r.total_points_spent),
       lastDailyClaimMs: Number(r.last_daily_claim_ms)
+    };
+  }
+
+  _mapHold(r) {
+    return {
+      holdId: r.hold_id,
+      uid: r.uid,
+      purpose: r.purpose,
+      referenceId: r.reference_id || null,
+      amountCoins: Number(r.amount_coins),
+      capturedCoins: Number(r.captured_coins || 0),
+      releasedCoins: Number(r.released_coins || 0),
+      status: r.status,
+      idempotencyKey: r.idempotency_key,
+      createdAtMs: r.created_at ? new Date(r.created_at).getTime() : this.now(),
+      settledAtMs: r.settled_at ? new Date(r.settled_at).getTime() : null
     };
   }
 
@@ -1211,6 +2255,7 @@ export class PostgresLedgerStore {
   }
 
   _mapPayoutRequest(r) {
+    const masked = r.iban_masked || maskAccountNumber(r.iban_or_account);
     return {
       id: r.id,
       uid: r.uid,
@@ -1220,7 +2265,11 @@ export class PostgresLedgerStore {
       payoutMethod: r.payout_method,
       bankAccountHolder: r.bank_account_holder,
       bankName: r.bank_name,
-      ibanOrAccount: r.iban_or_account,
+      ibanOrAccount: masked,
+      ibanMasked: masked,
+      fromSubAgentsCoins: Number(r.from_sub_agents_coins || 0),
+      fromHostCoins: Number(r.from_host_coins || 0),
+      earliestReviewAtMs: r.earliest_review_at ? new Date(r.earliest_review_at).getTime() : (this.now() + this.payoutHoldMs),
       status: r.status,
       reviewerUid: r.reviewer_uid || null,
       reviewerNote: r.reviewer_note || null,
@@ -1247,8 +2296,64 @@ export class PostgresLedgerStore {
     };
   }
 
+  async recordServerActivity({ uid, activityType, count = 1 }) {
+    return this._withTx(async (c) => {
+      await this._ensureUserTx(c, { uid });
+      const countToday = await this._recordActivityTx(c, { uid, activityType, count });
+      return { uid, activityType, countToday };
+    });
+  }
+
+  async getEconomyConfig() {
+    return this._withTx((c) => this._getEconomyConfigTx(c));
+  }
+
+  async updateEconomyConfig({ reviewerUid, hostCommissionPercent, agentCommissionPercent }) {
+    return this._withTx(async (c) => {
+      const current = await this._getEconomyConfigTx(c);
+      const nextHost = hostCommissionPercent !== undefined ? hostCommissionPercent : current.hostCommissionPercent;
+      const nextAgent = agentCommissionPercent !== undefined ? agentCommissionPercent : current.agentCommissionPercent;
+      const split = validateCommissionPair(nextHost, nextAgent);
+
+      await c.query(
+        `INSERT INTO economy_config (id, host_commission_percent, agent_commission_percent, platform_commission_percent, updated_by, updated_at)
+         VALUES (1,$1,$2,$3,$4,NOW())
+         ON CONFLICT (id) DO UPDATE SET
+           host_commission_percent = EXCLUDED.host_commission_percent,
+           agent_commission_percent = EXCLUDED.agent_commission_percent,
+           platform_commission_percent = EXCLUDED.platform_commission_percent,
+           updated_by = EXCLUDED.updated_by,
+           updated_at = NOW()`,
+        [split.hostCommissionPercent, split.agentCommissionPercent, split.platformCommissionPercent, reviewerUid]
+      );
+
+      await c.query(
+        `INSERT INTO audit_logs (actor_uid, action, target_id, details) VALUES ($1,'UPDATE_ECONOMY_CONFIG','economy_config',$2)`,
+        [reviewerUid, JSON.stringify(split)]
+      );
+
+      return { ...current, ...split };
+    });
+  }
+
   async ensureUser(input) {
     return this._withTx((c) => this._ensureUserTx(c, input));
+  }
+
+  async getUserGateState(uid) {
+    return this._withTx((c) => this._ensureUserTx(c, { uid }));
+  }
+
+  async assertUserCanOperate(uid, { requireAgeVerified = true } = {}) {
+    return this._withTx(async (c) => {
+      const { user, wallet } = await this._ensureUserTx(c, { uid });
+      if (requireAgeVerified) {
+        assertAdultVerified(user);
+      } else {
+        assertAccountActive(user);
+      }
+      return { user, wallet };
+    });
   }
 
   async getIapTransaction(purchaseToken) {
@@ -1305,8 +2410,12 @@ export class PostgresLedgerStore {
           amount: Number(e.delta),
           delta: Number(e.delta),
           balanceAfter: Number(e.balance_after),
+          idempotencyKey: e.idempotency_key,
+          referenceId: e.reference_id || null,
           description: e.description,
-          timestamp: new Date(e.created_at).getTime()
+          metadata: typeof e.metadata === 'string' ? JSON.parse(e.metadata) : (e.metadata || {}),
+          timestamp: e.created_at ? new Date(e.created_at).getTime() : this.now(),
+          createdAtMs: e.created_at ? new Date(e.created_at).getTime() : this.now()
         }))
       };
     });
@@ -1333,7 +2442,7 @@ export class PostgresLedgerStore {
         throw new CallEngineError('INVALID_IAP_PAYLOAD', 'بيانات شراء Google Play غير صالحة', 400);
       }
       const { user, wallet } = await this._ensureUserTx(c, { uid, displayName, email });
-      if (user.deletedAt) throw new CallEngineError('ACCOUNT_DELETED', 'هذا الحساب محذوف', 403);
+      assertAccountActive(user);
 
       const insTx = await c.query(
         `INSERT INTO iap_transactions
@@ -1392,8 +2501,192 @@ export class PostgresLedgerStore {
     });
   }
 
+  async holdCoins({ uid, amount, purpose = 'MATCH_HOLD', referenceId = null, idempotencyKey }) {
+    return this._withTx(async (c) => {
+      const holdAmount = Number(amount);
+      if (!Number.isInteger(holdAmount) || holdAmount <= 0) {
+        throw new CallEngineError('INVALID_AMOUNT', 'قيمة الحجز يجب أن تكون عدداً صحيحاً موجباً', 400);
+      }
+      const key = String(idempotencyKey || `hold_${uid}_${crypto.randomUUID()}`);
+      const existingHold = await c.query(`SELECT * FROM ledger_holds WHERE idempotency_key = $1`, [key]);
+      if (existingHold.rowCount > 0) {
+        const h = this._mapHold(existingHold.rows[0]);
+        const { wallet } = await this._ensureUserTx(c, { uid: h.uid });
+        return { hold: h, wallet, duplicate: true };
+      }
+
+      const { user, wallet } = await this._ensureUserTx(c, { uid });
+      assertAdultVerified(user);
+      if ((wallet.debtCoins || 0) > 0) {
+        throw new CallEngineError('ACCOUNT_HAS_DEBT', 'لا يمكن حجز النقاط لوجود مديونية مستردات على الحساب.', 403, {
+          debtCoins: wallet.debtCoins
+        });
+      }
+      if (wallet.pointsBalance < holdAmount) {
+        throw new CallEngineError('INSUFFICIENT_COINS', 'رصيد النقاط غير كافٍ لحجز العملية', 402, {
+          balance: wallet.pointsBalance,
+          required: holdAmount
+        });
+      }
+
+      const upd = await c.query(
+        `UPDATE wallet_accounts
+         SET points_balance = points_balance - $1,
+             held_coins = held_coins + $1,
+             updated_at = NOW()
+         WHERE uid = $2 AND points_balance >= $1
+         RETURNING *`,
+        [holdAmount, uid]
+      );
+      if (upd.rowCount === 0) {
+        throw new CallEngineError('INSUFFICIENT_COINS', 'رصيد النقاط غير كافٍ', 402);
+      }
+      const updatedWallet = this._mapWallet(upd.rows[0]);
+      const holdId = `hold_${crypto.randomUUID()}`;
+      const ins = await c.query(
+        `INSERT INTO ledger_holds (hold_id, uid, purpose, reference_id, amount_coins, idempotency_key)
+         VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
+        [holdId, uid, String(purpose || 'MATCH_HOLD'), referenceId, holdAmount, key]
+      );
+
+      await c.query(
+        `INSERT INTO ledger_entries (entry_uuid, uid, entry_type, bucket, delta, balance_after, idempotency_key, reference_id, description, metadata)
+         VALUES ($1,$2,'HOLD_RESERVE','POINTS',$3,$4,$5,$6,$7,$8)`,
+        [crypto.randomUUID(), uid, -holdAmount, updatedWallet.pointsBalance, `hold_res_${key}`, holdId, `حجز مؤقت (${purpose}) (-${holdAmount} نقطة)`, JSON.stringify({ holdId, purpose, referenceId })]
+      );
+
+      return { hold: this._mapHold(ins.rows[0]), wallet: updatedWallet, duplicate: false };
+    });
+  }
+
+  async captureHold({
+    holdId,
+    captureAmount = null,
+    entryType = 'MATCH_SPEND',
+    description = null,
+    creditPlatformRevenue = true,
+    idempotencyKey = null
+  }) {
+    return this._withTx(async (c) => {
+      const hRes = await c.query(`SELECT * FROM ledger_holds WHERE hold_id = $1 FOR UPDATE`, [holdId]);
+      if (hRes.rowCount === 0) throw new CallEngineError('HOLD_NOT_FOUND', 'سجل الحجز غير موجود', 404);
+      const hold = this._mapHold(hRes.rows[0]);
+      const capKey = String(idempotencyKey || `capture_${holdId}`);
+
+      if (hold.status !== 'ACTIVE') {
+        const existingCap = await c.query(`SELECT 1 FROM ledger_entries WHERE idempotency_key IN ($1, $2)`, [`${capKey}_cap`, `${capKey}_rel`]);
+        if (hold.status === 'CAPTURED' && existingCap.rowCount > 0) {
+          const { wallet } = await this._ensureUserTx(c, { uid: hold.uid });
+          return { hold, wallet, duplicate: true };
+        }
+        throw new CallEngineError('HOLD_ALREADY_SETTLED', 'تمت تسوية هذا الحجز مسبقاً', 409);
+      }
+
+      const remaining = hold.amountCoins - hold.capturedCoins - hold.releasedCoins;
+      const toCapture = captureAmount === null || captureAmount === undefined ? remaining : Number(captureAmount);
+      if (!Number.isInteger(toCapture) || toCapture < 0 || toCapture > remaining) {
+        throw new CallEngineError('INVALID_CAPTURE_AMOUNT', 'مبلغ الالتقاط يتجاوز الرصيد المحجوز', 400);
+      }
+      const toRelease = remaining - toCapture;
+
+      await this._ensureUserTx(c, { uid: hold.uid });
+      const upd = await c.query(
+        `UPDATE wallet_accounts
+         SET held_coins = held_coins - $1,
+             points_balance = points_balance + $2,
+             total_points_spent = total_points_spent + $3,
+             updated_at = NOW()
+         WHERE uid = $4 AND held_coins >= $1
+         RETURNING *`,
+        [remaining, toRelease, toCapture, hold.uid]
+      );
+      if (upd.rowCount === 0) throw new CallEngineError('HELD_BALANCE_CORRUPT', 'رصيد الحجز غير متطابق', 409);
+      const updatedWallet = this._mapWallet(upd.rows[0]);
+
+      const hUpd = await c.query(
+        `UPDATE ledger_holds
+         SET captured_coins = captured_coins + $1,
+             released_coins = released_coins + $2,
+             status = 'CAPTURED',
+             settled_at = NOW()
+         WHERE hold_id = $3 RETURNING *`,
+        [toCapture, toRelease, holdId]
+      );
+
+      if (toRelease > 0) {
+        await c.query(
+          `INSERT INTO ledger_entries (entry_uuid, uid, entry_type, bucket, delta, balance_after, idempotency_key, reference_id, description, metadata)
+           VALUES ($1,$2,'HOLD_RELEASE','POINTS',$3,$4,$5,$6,$7,$8)`,
+          [crypto.randomUUID(), hold.uid, toRelease, updatedWallet.pointsBalance, `${capKey}_rel`, holdId, `فك جزء غير مستخدم من الحجز (+${toRelease} نقطة)`, JSON.stringify({ holdId })]
+        );
+      }
+      if (toCapture > 0) {
+        await c.query(
+          `INSERT INTO ledger_entries (entry_uuid, uid, entry_type, bucket, delta, balance_after, idempotency_key, reference_id, description, metadata)
+           VALUES ($1,$2,$3,'HELD_POINTS',$4,$5,$6,$7,$8,$9)`,
+          [crypto.randomUUID(), hold.uid, entryType, -toCapture, updatedWallet.heldCoins, `${capKey}_cap`, hold.referenceId || holdId, description || `تأكيد خصم محجوز (${toCapture} نقطة)`, JSON.stringify({ holdId, purpose: hold.purpose })]
+        );
+        if (creditPlatformRevenue) {
+          await this._creditPlatformRevenueTx(c, {
+            amount: toCapture,
+            idempotencyKey: `${capKey}_plat`,
+            referenceId: hold.referenceId || holdId,
+            description: `إيراد منصة من التزام محجوز (${entryType}) (+${toCapture} نقطة)`,
+            metadata: { uid: hold.uid, holdId, entryType }
+          });
+        }
+      }
+
+      return { hold: this._mapHold(hUpd.rows[0]), wallet: updatedWallet, duplicate: false };
+    });
+  }
+
+  async releaseHold({ holdId, reason = 'HOLD_RELEASED', idempotencyKey = null }) {
+    return this._withTx(async (c) => {
+      const hRes = await c.query(`SELECT * FROM ledger_holds WHERE hold_id = $1 FOR UPDATE`, [holdId]);
+      if (hRes.rowCount === 0) throw new CallEngineError('HOLD_NOT_FOUND', 'سجل الحجز غير موجود', 404);
+      const hold = this._mapHold(hRes.rows[0]);
+      if (hold.status === 'RELEASED') {
+        const { wallet } = await this._ensureUserTx(c, { uid: hold.uid });
+        return { hold, wallet, duplicate: true };
+      }
+      if (hold.status !== 'ACTIVE') {
+        throw new CallEngineError('HOLD_ALREADY_SETTLED', 'لا يمكن فك حجز تم التقاطه مسبقاً', 409);
+      }
+
+      const remaining = hold.amountCoins - hold.capturedCoins - hold.releasedCoins;
+      await this._ensureUserTx(c, { uid: hold.uid });
+      const upd = await c.query(
+        `UPDATE wallet_accounts
+         SET held_coins = GREATEST(0, held_coins - $1),
+             points_balance = points_balance + $1,
+             updated_at = NOW()
+         WHERE uid = $2 RETURNING *`,
+        [remaining, hold.uid]
+      );
+      const updatedWallet = this._mapWallet(upd.rows[0]);
+      const hUpd = await c.query(
+        `UPDATE ledger_holds SET released_coins = released_coins + $1, status = 'RELEASED', settled_at = NOW() WHERE hold_id = $2 RETURNING *`,
+        [remaining, holdId]
+      );
+
+      const relKey = String(idempotencyKey || `rel_${holdId}`);
+      await c.query(
+        `INSERT INTO ledger_entries (entry_uuid, uid, entry_type, bucket, delta, balance_after, idempotency_key, reference_id, description, metadata)
+         VALUES ($1,$2,'HOLD_RELEASE','POINTS',$3,$4,$5,$6,$7,$8)
+         ON CONFLICT (idempotency_key) DO NOTHING`,
+        [crypto.randomUUID(), hold.uid, remaining, updatedWallet.pointsBalance, relKey, holdId, `استرجاع حجز غير مستخدم (${reason}) (+${remaining} نقطة)`, JSON.stringify({ holdId, reason })]
+      );
+
+      return { hold: this._mapHold(hUpd.rows[0]), wallet: updatedWallet, duplicate: false };
+    });
+  }
+
   async spendCoins({ uid, amount, entryType = 'MATCH_SPEND', description, idempotencyKey, referenceId = null, metadata = {} }) {
     return this._withTx(async (c) => {
+      if (!ALLOWED_CLIENT_SPEND_ENTRY_TYPES.has(entryType)) {
+        throw new CallEngineError('INVALID_ENTRY_TYPE', 'نوع عملية الخصم غير مسموح به', 400, { entryType });
+      }
       const spendAmount = Number(amount);
       if (!Number.isInteger(spendAmount) || spendAmount <= 0) {
         throw new CallEngineError('INVALID_AMOUNT', 'قيمة الخصم غير صالحة', 400);
@@ -1405,7 +2698,8 @@ export class PostgresLedgerStore {
         return { wallet, duplicate: true };
       }
 
-      const { wallet } = await this._ensureUserTx(c, { uid });
+      const { user, wallet } = await this._ensureUserTx(c, { uid });
+      assertAdultVerified(user);
       if ((wallet.debtCoins || 0) > 0) {
         throw new CallEngineError('ACCOUNT_HAS_DEBT', 'لا يمكن استخدام النقاط لوجود مديونية مستردات على الحساب. يرجى سداد المديونية أولاً.', 403, {
           debtCoins: wallet.debtCoins
@@ -1425,22 +2719,70 @@ export class PostgresLedgerStore {
         [spendAmount, uid]
       );
       const updatedWallet = this._mapWallet(upd.rows[0]);
+      const safeDescription = sanitizeSpendDescription(entryType, description);
       await c.query(
         `INSERT INTO ledger_entries (entry_uuid, uid, entry_type, bucket, delta, balance_after, idempotency_key, reference_id, description, metadata)
          VALUES ($1,$2,$3,'POINTS',$4,$5,$6,$7,$8,$9)`,
-        [crypto.randomUUID(), uid, entryType, -spendAmount, updatedWallet.pointsBalance, key, referenceId, description || `خصم ${spendAmount} نقطة`, JSON.stringify(metadata)]
+        [crypto.randomUUID(), uid, entryType, -spendAmount, updatedWallet.pointsBalance, key, referenceId, safeDescription, JSON.stringify(metadata)]
       );
+
+      await this._creditPlatformRevenueTx(c, {
+        amount: spendAmount,
+        idempotencyKey: `${key}_plat`,
+        referenceId,
+        description: `إيراد منصة (${entryType}) (+${spendAmount} نقطة)`,
+        metadata: { uid, entryType }
+      });
+
       return { wallet: updatedWallet, duplicate: false };
     });
   }
 
-  async claimDailyBonus({ uid }) {
+  async claimDailyBonus({ uid, deviceId = null }) {
     return this._withTx(async (c) => {
-      const { wallet } = await this._ensureUserTx(c, { uid });
+      const { user, wallet } = await this._ensureUserTx(c, { uid });
+      assertAccountActive(user);
       const nowMs = this.now();
       if (wallet.lastDailyClaimMs > 0 && nowMs - wallet.lastDailyClaimMs < DAILY_CLAIM_COOLDOWN_MS) {
         throw new CallEngineError('DAILY_BONUS_COOLDOWN', 'تم استلام المكافأة اليومية بالفعل. حاول بعد 24 ساعة.', 429);
       }
+
+      const config = await this._getEconomyConfigTx(c);
+      const dayKey = new Date(nowMs).toISOString().slice(0, 10);
+      const deviceHash = hashDeviceId(deviceId);
+
+      if (deviceHash) {
+        const dRes = await c.query(
+          `SELECT * FROM daily_device_claims WHERE device_hash = $1 AND day_key = $2 FOR UPDATE`,
+          [deviceHash, dayKey]
+        );
+        const dRow = dRes.rows[0];
+        if (dRow) {
+          const lastDevMs = Number(dRow.last_daily_claim_ms || 0);
+          if (lastDevMs > 0 && nowMs - lastDevMs < DAILY_CLAIM_COOLDOWN_MS) {
+            throw new CallEngineError('DAILY_BONUS_DEVICE_COOLDOWN', 'تم استلام المكافأة اليومية على هذا الجهاز بالفعل اليوم.', 429);
+          }
+          if (Number(dRow.free_coins_claimed || 0) + DAILY_BONUS_COINS > config.dailyFreeRewardCapCoins) {
+            throw new CallEngineError('DAILY_REWARD_CAP_REACHED', 'تم بلوغ الحد الأقصى اليومي للنقاط المجانية على هذا الجهاز.', 429);
+          }
+        }
+      }
+
+      const freeRes = await c.query(
+        `SELECT COALESCE(SUM(delta), 0)::bigint AS total_free
+         FROM ledger_entries
+         WHERE uid = $1 AND entry_type IN ('DAILY_FREE', 'MISSION_REWARD')
+           AND (
+             metadata->>'dayKey' = $2
+             OR (metadata->>'dayKey' IS NULL AND created_at >= ($2 || 'T00:00:00Z')::timestamptz AND created_at < (($2::date + INTERVAL '1 day')::timestamptz))
+           )`,
+        [uid, dayKey]
+      );
+      const userFreeToday = Number(freeRes.rows[0]?.total_free || 0);
+      if (userFreeToday + DAILY_BONUS_COINS > config.dailyFreeRewardCapCoins) {
+        throw new CallEngineError('DAILY_REWARD_CAP_REACHED', 'تم بلوغ الحد الأقصى اليومي للنقاط المجانية لهذا الحساب.', 429);
+      }
+
       const upd = await c.query(
         `UPDATE wallet_accounts
          SET points_balance = points_balance + $1,
@@ -1451,34 +2793,38 @@ export class PostgresLedgerStore {
         [DAILY_BONUS_COINS, nowMs, uid]
       );
       const updatedWallet = this._mapWallet(upd.rows[0]);
+
+      if (deviceHash) {
+        await c.query(
+          `INSERT INTO daily_device_claims (device_hash, day_key, last_daily_claim_ms, free_coins_claimed)
+           VALUES ($1,$2,$3,$4)
+           ON CONFLICT (device_hash, day_key) DO UPDATE SET
+             last_daily_claim_ms = EXCLUDED.last_daily_claim_ms,
+             free_coins_claimed = daily_device_claims.free_coins_claimed + $4,
+             updated_at = NOW()`,
+          [deviceHash, dayKey, nowMs, DAILY_BONUS_COINS]
+        );
+      }
+
       await c.query(
-        `INSERT INTO ledger_entries (entry_uuid, uid, entry_type, bucket, delta, balance_after, idempotency_key, description)
-         VALUES ($1,$2,'DAILY_FREE','POINTS',$3,$4,$5,$6)`,
-        [crypto.randomUUID(), uid, DAILY_BONUS_COINS, updatedWallet.pointsBalance, `daily_${uid}_${nowMs}`, `مكافأة الدخول اليومي (+${DAILY_BONUS_COINS} نقطة)`]
+        `INSERT INTO ledger_entries (entry_uuid, uid, entry_type, bucket, delta, balance_after, idempotency_key, description, metadata)
+         VALUES ($1,$2,'DAILY_FREE','POINTS',$3,$4,$5,$6,$7)`,
+        [crypto.randomUUID(), uid, DAILY_BONUS_COINS, updatedWallet.pointsBalance, `daily_${uid}_${dayKey}_${nowMs}`, `مكافأة الدخول اليومي (+${DAILY_BONUS_COINS} نقطة)`, JSON.stringify({ dayKey })]
       );
       return { wallet: updatedWallet, creditedCoins: DAILY_BONUS_COINS };
     });
   }
 
-  async claimMissionReward({ uid, missionId }) {
-    const MISSION_REWARD_CATALOG = {
-      mission_stream: 35,
-      mission_chat: 20,
-      mission_matches: 25,
-      mission_gifts: 30,
-      mission_daily_login: 15,
-      daily_milestone: 50
-    };
+  async claimMissionReward({ uid, missionId, deviceId = null }) {
     return this._withTx(async (c) => {
       const cleanId = String(missionId || '').trim();
-      const rewardCoins = MISSION_REWARD_CATALOG[cleanId];
-      if (!rewardCoins) {
-        throw new CallEngineError('INVALID_MISSION', 'معرف المهمة غير صالح', 400);
+      const mission = SERVER_MISSION_CATALOG[cleanId];
+      if (!mission) {
+        throw new CallEngineError('INVALID_MISSION', 'معرف المهمة غير صالح أو غير موثق من الخادم', 400);
       }
       const { user } = await this._ensureUserTx(c, { uid });
-      if (user.deletedAt) {
-        throw new CallEngineError('ACCOUNT_DELETED', 'هذا الحساب محذوف', 403);
-      }
+      assertAccountActive(user);
+
       const nowMs = this.now();
       const dayKey = new Date(nowMs).toISOString().slice(0, 10);
       const idempotencyKey = `mission_${uid}_${dayKey}_${cleanId}`;
@@ -1486,6 +2832,57 @@ export class PostgresLedgerStore {
       if (existing.rowCount > 0) {
         throw new CallEngineError('MISSION_ALREADY_CLAIMED', 'تم استلام مكافأة هذه المهمة اليوم بالفعل.', 409);
       }
+
+      const actRes = await c.query(
+        `SELECT activity_count FROM daily_activity_counters WHERE uid = $1 AND day_key = $2 AND activity_type = $3`,
+        [uid, dayKey, mission.requiredActivity]
+      );
+      const activityCount = Number(actRes.rows[0]?.activity_count || 0);
+      if (activityCount < mission.minCount) {
+        throw new CallEngineError(
+          'MISSION_NOT_VERIFIED',
+          `لم يتم تسجيل نشاط فعلي كافٍ على الخادم لإكمال مهمة (${mission.description}).`,
+          403
+        );
+      }
+
+      const config = await this._getEconomyConfigTx(c);
+      const rewardCoins = mission.rewardCoins;
+      const freeRes = await c.query(
+        `SELECT COALESCE(SUM(delta), 0)::bigint AS total_free
+         FROM ledger_entries
+         WHERE uid = $1 AND entry_type IN ('DAILY_FREE', 'MISSION_REWARD')
+           AND (
+             metadata->>'dayKey' = $2
+             OR (metadata->>'dayKey' IS NULL AND created_at >= ($2 || 'T00:00:00Z')::timestamptz AND created_at < (($2::date + INTERVAL '1 day')::timestamptz))
+           )`,
+        [uid, dayKey]
+      );
+      const userFreeToday = Number(freeRes.rows[0]?.total_free || 0);
+      if (userFreeToday + rewardCoins > config.dailyFreeRewardCapCoins) {
+        throw new CallEngineError('DAILY_REWARD_CAP_REACHED', 'تم بلوغ الحد الأقصى اليومي للنقاط المجانية لهذا الحساب.', 429);
+      }
+
+      const deviceHash = hashDeviceId(deviceId);
+      if (deviceHash) {
+        const dRes = await c.query(
+          `SELECT free_coins_claimed FROM daily_device_claims WHERE device_hash = $1 AND day_key = $2 FOR UPDATE`,
+          [deviceHash, dayKey]
+        );
+        const claimedOnDevice = Number(dRes.rows[0]?.free_coins_claimed || 0);
+        if (claimedOnDevice + rewardCoins > config.dailyFreeRewardCapCoins) {
+          throw new CallEngineError('DAILY_REWARD_CAP_REACHED', 'تم بلوغ الحد الأقصى اليومي للنقاط المجانية على هذا الجهاز.', 429);
+        }
+        await c.query(
+          `INSERT INTO daily_device_claims (device_hash, day_key, last_daily_claim_ms, free_coins_claimed)
+           VALUES ($1,$2,0,$3)
+           ON CONFLICT (device_hash, day_key) DO UPDATE SET
+             free_coins_claimed = daily_device_claims.free_coins_claimed + $3,
+             updated_at = NOW()`,
+          [deviceHash, dayKey, rewardCoins]
+        );
+      }
+
       const upd = await c.query(
         `UPDATE wallet_accounts
          SET points_balance = points_balance + $1,
@@ -1496,9 +2893,9 @@ export class PostgresLedgerStore {
       );
       const updatedWallet = this._mapWallet(upd.rows[0]);
       await c.query(
-        `INSERT INTO ledger_entries (entry_uuid, uid, entry_type, bucket, delta, balance_after, idempotency_key, reference_id, description)
-         VALUES ($1,$2,'MISSION_REWARD','POINTS',$3,$4,$5,$6,$7)`,
-        [crypto.randomUUID(), uid, rewardCoins, updatedWallet.pointsBalance, idempotencyKey, cleanId, `مكافأة مهمة يومية (${cleanId}) (+${rewardCoins} نقطة)`]
+        `INSERT INTO ledger_entries (entry_uuid, uid, entry_type, bucket, delta, balance_after, idempotency_key, reference_id, description, metadata)
+         VALUES ($1,$2,'MISSION_REWARD','POINTS',$3,$4,$5,$6,$7,$8)`,
+        [crypto.randomUUID(), uid, rewardCoins, updatedWallet.pointsBalance, idempotencyKey, cleanId, `مكافأة مهمة يومية موثقة (${cleanId}) (+${rewardCoins} نقطة)`, JSON.stringify({ dayKey, missionId: cleanId })]
       );
       return { wallet: updatedWallet, creditedCoins: rewardCoins };
     });
@@ -1507,9 +2904,7 @@ export class PostgresLedgerStore {
   async applyForHost({ uid, agencyName = '' }) {
     return this._withTx(async (c) => {
       const { user } = await this._ensureUserTx(c, { uid });
-      if (user.deletedAt) {
-        throw new CallEngineError('ACCOUNT_DELETED', 'هذا الحساب محذوف', 403);
-      }
+      assertAdultVerified(user);
       const cleanAgency = String(agencyName || '').trim();
       const res = await c.query(
         `UPDATE users
@@ -1527,89 +2922,244 @@ export class PostgresLedgerStore {
     });
   }
 
-  async sendGiftAtomic({ senderUid, recipientUid, giftId, giftName, coinsCost, idempotencyKey, streamId = null }) {
+  async sendGiftAtomic({ senderUid, recipientUid, giftId, giftName = null, coinsCost = null, idempotencyKey, streamId = null }) {
     return this._withTx(async (c) => {
-      const cost = Number(coinsCost);
-      if (!Number.isInteger(cost) || cost <= 0 || !recipientUid || senderUid === recipientUid) {
-        throw new CallEngineError('INVALID_GIFT_REQUEST', 'بيانات الهدية غير صالحة', 400);
-      }
-      const key = String(idempotencyKey || `gift_${senderUid}_${crypto.randomUUID()}`);
-      const existing = await c.query(`SELECT * FROM ledger_entries WHERE idempotency_key = $1`, [key]);
-      if (existing.rowCount > 0) {
-        const { wallet } = await this._ensureUserTx(c, { uid: senderUid });
-        return { senderWallet: wallet, duplicate: true };
+      if (!recipientUid || senderUid === recipientUid) {
+        throw new CallEngineError('INVALID_RECIPIENT', 'لا يمكن إرسال الهدية لهذا المستلم', 400);
       }
 
       const sender = await this._ensureUserTx(c, { uid: senderUid });
-      const recipient = await this._ensureUserTx(c, { uid: recipientUid });
+      assertAdultVerified(sender.user);
       if ((sender.wallet.debtCoins || 0) > 0) {
         throw new CallEngineError('ACCOUNT_HAS_DEBT', 'لا يمكن إرسال الهدايا لوجود مديونية مستردات على الحساب.', 403, {
           debtCoins: sender.wallet.debtCoins
         });
       }
+
+      const catalogGift = validateAndResolveGift({ giftId, coinsCost });
+      const cost = catalogGift.coinsCost;
+      const authoritativeGiftName = catalogGift.name;
+
+      const key = String(idempotencyKey || `gift_${senderUid}_${crypto.randomUUID()}`);
+      const existing = await c.query(`SELECT * FROM ledger_entries WHERE idempotency_key = $1`, [key]);
+      if (existing.rowCount > 0) {
+        const { wallet } = await this._ensureUserTx(c, { uid: senderUid });
+        return { senderWallet: wallet, duplicate: true, coinsCost: cost };
+      }
+
+      const recipient = await this._ensureUserTx(c, { uid: recipientUid });
       if (sender.wallet.pointsBalance < cost) {
         throw new CallEngineError('INSUFFICIENT_COINS', 'رصيد النقاط غير كافٍ لإرسال هذه الهدية', 402);
       }
+
+      const config = await this._getEconomyConfigTx(c);
+      const agMemRes = await c.query(`SELECT parent_agent_uid FROM agency_memberships WHERE uid = $1`, [recipientUid]);
+      const parentUid = agMemRes.rows[0]?.parent_agent_uid || null;
+      const agent = parentUid ? await this._ensureUserTx(c, { uid: parentUid }) : null;
+
+      const { hostShare, agentShare, platformShare } = computeRevenueSplit({
+        cost,
+        hostCommissionPercent: recipient.user.hostCommissionPercent || config.hostCommissionPercent,
+        agentCommissionPercent: agent ? (agent.user.agentCommissionPercent || config.agentCommissionPercent) : 0,
+        hasAgent: Boolean(agent)
+      });
+
       const sUpd = await c.query(
-        `UPDATE wallet_accounts SET points_balance = points_balance - $1, total_points_spent = total_points_spent + $1, updated_at = NOW() WHERE uid = $2 RETURNING *`,
+        `UPDATE wallet_accounts SET points_balance = points_balance - $1, total_points_spent = total_points_spent + $1, updated_at = NOW() WHERE uid = $2 AND points_balance >= $1 RETURNING *`,
         [cost, senderUid]
       );
-      const hostShare = Math.floor((cost * Math.max(10, Math.min(80, recipient.user.hostCommissionPercent || 50))) / 100);
       const rUpd = await c.query(
         `UPDATE wallet_accounts SET host_earnings_coins = host_earnings_coins + $1, updated_at = NOW() WHERE uid = $2 RETURNING *`,
         [hostShare, recipientUid]
       );
+
       await c.query(
         `INSERT INTO ledger_entries (entry_uuid, uid, entry_type, bucket, delta, balance_after, idempotency_key, reference_id, description, metadata)
          VALUES ($1,$2,'GIFT_SENT','POINTS',$3,$4,$5,$6,$7,$8)`,
-        [crypto.randomUUID(), senderUid, -cost, Number(sUpd.rows[0].points_balance), key, streamId || recipientUid, `إرسال هدية ${giftName || giftId}`, JSON.stringify({ recipientUid, giftId, streamId })]
+        [crypto.randomUUID(), senderUid, -cost, Number(sUpd.rows[0].points_balance), key, streamId || recipientUid, `إرسال هدية ${authoritativeGiftName} (-${cost} نقطة)`, JSON.stringify({ recipientUid, giftId: catalogGift.giftId, streamId })]
       );
       await c.query(
         `INSERT INTO ledger_entries (entry_uuid, uid, entry_type, bucket, delta, balance_after, idempotency_key, reference_id, description, metadata)
          VALUES ($1,$2,'GIFT_RECEIVE','HOST_EARNINGS',$3,$4,$5,$6,$7,$8)`,
-        [crypto.randomUUID(), recipientUid, hostShare, Number(rUpd.rows[0].host_earnings_coins), `${key}_rx`, streamId || senderUid, `أرباح هدية ${giftName || giftId}`, JSON.stringify({ senderUid, giftId, streamId })]
+        [crypto.randomUUID(), recipientUid, hostShare, Number(rUpd.rows[0].host_earnings_coins), `${key}_rx`, streamId || senderUid, `أرباح هدية ${authoritativeGiftName} (+${hostShare} نقطة أرباح)`, JSON.stringify({ senderUid, giftId: catalogGift.giftId, streamId })]
       );
 
-      let agentShare = 0;
-      const agMemRes = await c.query(`SELECT parent_agent_uid FROM agency_memberships WHERE uid = $1`, [recipientUid]);
-      const parentUid = agMemRes.rows[0]?.parent_agent_uid;
-      if (parentUid) {
-        const agent = await this._ensureUserTx(c, { uid: parentUid });
-        const agentPct = Math.max(1, Math.min(50, agent.user.agentCommissionPercent || 20));
-        agentShare = Math.floor((cost * agentPct) / 100);
-        if (agentShare > 0) {
-          const aUpd = await c.query(
-            `UPDATE wallet_accounts SET sub_agents_earnings_coins = sub_agents_earnings_coins + $1, updated_at = NOW() WHERE uid = $2 RETURNING *`,
-            [agentShare, parentUid]
-          );
-          await c.query(
-            `INSERT INTO ledger_entries (entry_uuid, uid, entry_type, bucket, delta, balance_after, idempotency_key, reference_id, description)
-             VALUES ($1,$2,'AGENT_COMMISSION','AGENCY_EARNINGS',$3,$4,$5,$6,$7)`,
-            [crypto.randomUUID(), parentUid, agentShare, Number(aUpd.rows[0].sub_agents_earnings_coins), `${key}_ag`, recipientUid, `عمولة وكالة على هدية مضيف (+${agentShare} نقطة)`]
-          );
-        }
+      if (agent && agentShare > 0) {
+        const aUpd = await c.query(
+          `UPDATE wallet_accounts SET sub_agents_earnings_coins = sub_agents_earnings_coins + $1, updated_at = NOW() WHERE uid = $2 RETURNING *`,
+          [agentShare, parentUid]
+        );
+        await c.query(
+          `INSERT INTO ledger_entries (entry_uuid, uid, entry_type, bucket, delta, balance_after, idempotency_key, reference_id, description, metadata)
+           VALUES ($1,$2,'AGENT_COMMISSION','AGENCY_EARNINGS',$3,$4,$5,$6,$7,$8)`,
+          [crypto.randomUUID(), parentUid, agentShare, Number(aUpd.rows[0].sub_agents_earnings_coins), `${key}_ag`, recipientUid, `عمولة وكالة على هدية مضيف (+${agentShare} نقطة)`, JSON.stringify({ hostUid: recipientUid, giftId: catalogGift.giftId })]
+        );
       }
 
-      return { senderWallet: this._mapWallet(sUpd.rows[0]), recipientEarningsAdded: hostShare, agentCommissionAdded: agentShare, duplicate: false };
+      if (platformShare > 0) {
+        await this._creditPlatformRevenueTx(c, {
+          amount: platformShare,
+          idempotencyKey: `${key}_plat`,
+          referenceId: streamId || recipientUid,
+          description: `حصة المنصة من هدية ${authoritativeGiftName} (+${platformShare} نقطة)`,
+          metadata: { senderUid, recipientUid, giftId: catalogGift.giftId }
+        });
+      }
+
+      await this._recordActivityTx(c, { uid: senderUid, activityType: 'GIFT_SENT', count: 1 });
+
+      return {
+        senderWallet: this._mapWallet(sUpd.rows[0]),
+        recipientEarningsAdded: hostShare,
+        agentCommissionAdded: agentShare,
+        platformRevenueAdded: platformShare,
+        coinsCost: cost,
+        giftName: authoritativeGiftName,
+        duplicate: false
+      };
     });
   }
 
-  async submitAgeVerification({ uid, displayName = '', email = '', dob, ageYears, acceptedTermsAt, acceptedPrivacyAt }) {
+  async submitAgeVerification({ uid, displayName = '', email = '', dob, acceptedTermsAt, acceptedPrivacyAt, deviceId = null }) {
+    const nowMs = this.now();
+    const deviceHash = hashDeviceId(deviceId);
+
+    const preCheck = await this._withTx(async (c) => {
+      const { user } = await this._ensureUserTx(c, { uid, displayName, email });
+      assertAccountActive(user);
+      let deviceLocked = false;
+      if (deviceHash) {
+        const lockRes = await c.query(`SELECT 1 FROM underage_device_locks WHERE device_hash = $1`, [deviceHash]);
+        deviceLocked = lockRes.rowCount > 0;
+      }
+      if (user.underageLocked || deviceLocked) {
+        throw new CallEngineError(
+          'UNDERAGE_LOCKED',
+          'عذراً، هذا الحساب أو الجهاز مقيد نهائياً لعدم استيفاء شرط العمر (+18 سنة).',
+          403
+        );
+      }
+
+      const ageCheck = computeExactAgeFromDob(dob, nowMs);
+      if (!ageCheck.isAdult) {
+        await c.query(
+          `UPDATE users
+           SET underage_locked = TRUE,
+               underage_locked_reason = 'UNDERAGE_SUBMISSION',
+               underage_locked_at = $1,
+               age_verified = FALSE,
+               age_verification_status = 'REJECTED_UNDERAGE',
+               dob = $2,
+               age_years = $3,
+               updated_at = NOW()
+           WHERE uid = $4`,
+          [nowMs, ageCheck.normalizedDob, ageCheck.ageYears, uid]
+        );
+        if (deviceHash) {
+          await c.query(
+            `INSERT INTO underage_device_locks (device_hash, uid, dob_submitted, reason)
+             VALUES ($1,$2,$3,'UNDERAGE_SUBMISSION')
+             ON CONFLICT (device_hash) DO NOTHING`,
+            [deviceHash, uid, ageCheck.normalizedDob]
+          );
+        }
+        await c.query(
+          `INSERT INTO age_verifications (uid, display_name, email, dob, age_years, status, reviewer_uid, rejection_reason, accepted_terms_at, accepted_privacy_at, reviewed_at)
+           VALUES ($1,$2,$3,$4,$5,'REJECTED_UNDERAGE','system_age_gate','العمر المحسوب أقل من 18 عاماً',$6,$7,NOW())
+           ON CONFLICT (uid) DO UPDATE SET
+             dob = EXCLUDED.dob,
+             age_years = EXCLUDED.age_years,
+             status = 'REJECTED_UNDERAGE',
+             reviewer_uid = 'system_age_gate',
+             rejection_reason = 'العمر المحسوب أقل من 18 عاماً',
+             reviewed_at = NOW()`,
+          [uid, user.displayName, user.email, ageCheck.normalizedDob, ageCheck.ageYears, Number(acceptedTermsAt || nowMs), Number(acceptedPrivacyAt || nowMs)]
+        );
+        await c.query(
+          `INSERT INTO audit_logs (actor_uid, action, target_id, details)
+           VALUES ($1,'UNDERAGE_ATTEMPT_LOCKED',$2,$3)`,
+          [uid, uid, JSON.stringify({ dob: ageCheck.normalizedDob, ageYears: ageCheck.ageYears, deviceLocked: Boolean(deviceHash) })]
+        );
+        return { underageLockedNow: true, ageYears: ageCheck.ageYears };
+      }
+
+      if (!acceptedTermsAt || !acceptedPrivacyAt) {
+        throw new CallEngineError('LEGAL_CONSENT_REQUIRED', 'الموافقة على الشروط وسياسة الخصوصية مطلوبة', 400);
+      }
+      return { underageLockedNow: false, ageCheck };
+    });
+
+    if (preCheck.underageLockedNow) {
+      throw new CallEngineError(
+        'UNDERAGE_FORBIDDEN',
+        'التطبيق مخصص للبالغين (+18) فقط. تم تقييد الحساب والجهاز.',
+        403,
+        { underageLocked: true, ageYears: preCheck.ageYears }
+      );
+    }
+
+    const { ageCheck } = preCheck;
+    let providerOutcome = { status: 'PENDING_REVIEW', provider: 'manual_admin_review', rejectionReason: null };
+    if (this.ageVerificationProvider && typeof this.ageVerificationProvider.verify === 'function') {
+      const ext = await this.ageVerificationProvider.verify({
+        uid,
+        dob: ageCheck.normalizedDob,
+        ageYears: ageCheck.ageYears
+      });
+      if (ext?.status) {
+        providerOutcome = {
+          status: String(ext.status).toUpperCase(),
+          provider: ext.provider || 'external_idv',
+          rejectionReason: ext.rejectionReason || null
+        };
+      }
+    }
+
     return this._withTx(async (c) => {
-      if (!dob || Number(ageYears) < 18) throw new CallEngineError('UNDERAGE_FORBIDDEN', 'التطبيق مخصص للبالغين (+18) فقط', 403);
-      await this._ensureUserTx(c, { uid, displayName, email });
+      const { user } = await this._ensureUserTx(c, { uid, displayName, email });
+      const isApproved = providerOutcome.status === 'APPROVED';
+      const reviewerUid = providerOutcome.status === 'PENDING_REVIEW' ? null : `provider:${providerOutcome.provider}`;
       await c.query(
-        `UPDATE users SET dob=$1, age_years=$2, accepted_terms_at=$3, accepted_privacy_at=$4, age_verified=FALSE, age_verification_status='PENDING_REVIEW', updated_at=NOW() WHERE uid=$5`,
-        [dob, Number(ageYears), Number(acceptedTermsAt), Number(acceptedPrivacyAt), uid]
+        `UPDATE users
+         SET dob = $1,
+             age_years = $2,
+             accepted_terms_at = $3,
+             accepted_privacy_at = $4,
+             age_verified = $5,
+             age_verification_status = $6,
+             updated_at = NOW()
+         WHERE uid = $7`,
+        [ageCheck.normalizedDob, ageCheck.ageYears, Number(acceptedTermsAt), Number(acceptedPrivacyAt), isApproved, providerOutcome.status, uid]
       );
       const res = await c.query(
-        `INSERT INTO age_verifications (uid, display_name, email, dob, age_years, status, accepted_terms_at, accepted_privacy_at)
-         VALUES ($1,$2,$3,$4,$5,'PENDING_REVIEW',$6,$7)
-         ON CONFLICT (uid) DO UPDATE SET dob=EXCLUDED.dob, age_years=EXCLUDED.age_years, status='PENDING_REVIEW', rejection_reason=NULL, submitted_at=NOW()
+        `INSERT INTO age_verifications (uid, display_name, email, dob, age_years, status, reviewer_uid, rejection_reason, accepted_terms_at, accepted_privacy_at, reviewed_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+         ON CONFLICT (uid) DO UPDATE SET
+           dob = EXCLUDED.dob,
+           age_years = EXCLUDED.age_years,
+           status = EXCLUDED.status,
+           reviewer_uid = EXCLUDED.reviewer_uid,
+           rejection_reason = EXCLUDED.rejection_reason,
+           accepted_terms_at = EXCLUDED.accepted_terms_at,
+           accepted_privacy_at = EXCLUDED.accepted_privacy_at,
+           submitted_at = NOW(),
+           reviewed_at = EXCLUDED.reviewed_at
          RETURNING *`,
-        [uid, displayName, email, dob, Number(ageYears), Number(acceptedTermsAt), Number(acceptedPrivacyAt)]
+        [
+          uid,
+          user.displayName,
+          user.email,
+          ageCheck.normalizedDob,
+          ageCheck.ageYears,
+          providerOutcome.status,
+          reviewerUid,
+          providerOutcome.rejectionReason,
+          Number(acceptedTermsAt),
+          Number(acceptedPrivacyAt),
+          providerOutcome.status === 'PENDING_REVIEW' ? null : new Date(nowMs).toISOString()
+        ]
       );
-      return this._mapAgeVerification(res.rows[0]);
+      return { ...this._mapAgeVerification(res.rows[0]), provider: providerOutcome.provider };
     });
   }
 
@@ -1635,6 +3185,10 @@ export class PostgresLedgerStore {
         `UPDATE users SET age_verified=$1, age_verification_status=$2, updated_at=NOW() WHERE uid=$3 RETURNING *`,
         [norm === 'APPROVED', norm, targetUid]
       );
+      await c.query(
+        `INSERT INTO audit_logs (actor_uid, action, target_id, details) VALUES ($1,'REVIEW_AGE_VERIFICATION',$2,$3)`,
+        [reviewerUid, targetUid, JSON.stringify({ decision: norm, reason: rejReason })]
+      );
       return { submission: this._mapAgeVerification(res.rows[0]), user: this._mapUser(uRes.rows[0]) };
     });
   }
@@ -1645,14 +3199,26 @@ export class PostgresLedgerStore {
       if (!Number.isInteger(coins) || coins < MIN_PAYOUT_COINS) {
         throw new CallEngineError('MIN_PAYOUT_NOT_MET', `الحد الأدنى لسحب الأرباح هو ${MIN_PAYOUT_COINS} نقطة`, 400);
       }
+      if (!bankAccountHolder || !bankName || !ibanOrAccount) {
+        throw new CallEngineError('MISSING_BANK_DETAILS', 'بيانات الحساب البنكي/التحويل مطلوبة بالكامل', 400);
+      }
       const { user, wallet } = await this._ensureUserTx(c, { uid });
+      assertAdultVerified(user);
       if ((wallet.debtCoins || 0) > 0) {
         throw new CallEngineError('ACCOUNT_HAS_DEBT', 'لا يمكن طلب سحب الأرباح لوجود مديونية مستردات على الحساب.', 403, {
           debtCoins: wallet.debtCoins
         });
       }
-      if (!user.ageVerified) throw new CallEngineError('AGE_VERIFICATION_REQUIRED', 'توثيق العمر مطلوب', 403);
       if (!user.isAgent && !user.isHost) throw new CallEngineError('PAYOUT_ROLE_REQUIRED', 'متاح للمضيفين والوكلاء فقط', 403);
+
+      const activeRes = await c.query(
+        `SELECT id FROM payout_requests WHERE uid = $1 AND status IN ('PENDING_REVIEW', 'APPROVED') LIMIT 1`,
+        [uid]
+      );
+      if (activeRes.rowCount > 0) {
+        throw new CallEngineError('ACTIVE_PAYOUT_EXISTS', 'لديك طلب سحب نشط قيد المراجعة بالفعل. انتظر البت فيه أولاً.', 409);
+      }
+
       const avail = wallet.hostEarningsCoins + wallet.subAgentsEarningsCoins;
       if (avail < coins) throw new CallEngineError('INSUFFICIENT_EARNINGS', 'رصيد الأرباح غير كافٍ', 402);
 
@@ -1668,14 +3234,34 @@ export class PostgresLedgerStore {
          WHERE uid = $4 RETURNING *`,
         [fromSub, rem, coins, uid]
       );
+      const updatedWallet = this._mapWallet(upd.rows[0]);
+
       const reqId = `payout_${crypto.randomUUID()}`;
-      const usdCents = Math.round((coins / 10) * 100);
+      const usdCents = Math.floor((coins * 100) / COINS_PER_USD);
+      const rawIban = String(ibanOrAccount).trim();
+      const masked = maskAccountNumber(rawIban);
+      const encryptedIban = encryptSensitiveField(rawIban, this.bankKey);
+      const nowMs = this.now();
+      const earliestIso = new Date(nowMs + this.payoutHoldMs).toISOString();
+
       const ins = await c.query(
-        `INSERT INTO payout_requests (id, uid, amount_coins, usd_equivalent_cents, payout_method, bank_account_holder, bank_name, iban_or_account, status)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'PENDING_REVIEW') RETURNING *`,
-        [reqId, uid, coins, usdCents, payoutMethod, bankAccountHolder, bankName, ibanOrAccount]
+        `INSERT INTO payout_requests (id, uid, amount_coins, usd_equivalent_cents, payout_method, bank_account_holder, bank_name, iban_or_account, iban_masked, from_sub_agents_coins, from_host_coins, earliest_review_at, status)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'PENDING_REVIEW') RETURNING *`,
+        [reqId, uid, coins, usdCents, payoutMethod, String(bankAccountHolder).trim(), String(bankName).trim(), encryptedIban, masked, fromSub, rem, earliestIso]
       );
-      return { request: this._mapPayoutRequest(ins.rows[0]), wallet: this._mapWallet(upd.rows[0]) };
+
+      await c.query(
+        `INSERT INTO ledger_entries (entry_uuid, uid, entry_type, bucket, delta, balance_after, idempotency_key, reference_id, description, metadata)
+         VALUES ($1,$2,'WITHDRAWAL_RESERVE','RESERVED_PAYOUT',$3,$4,$5,$6,$7,$8)`,
+        [crypto.randomUUID(), uid, coins, updatedWallet.reservedPayoutCoins, `payout_req_${reqId}`, reqId, `طلب سحب أرباح قيد المراجعة (-${coins} نقطة أرباح)`, JSON.stringify({ fromSubAgentsCoins: fromSub, fromHostCoins: rem })]
+      );
+
+      await c.query(
+        `INSERT INTO audit_logs (actor_uid, action, target_id, details) VALUES ($1,'CREATE_PAYOUT_REQUEST',$2,$3)`,
+        [uid, reqId, JSON.stringify({ amountCoins: coins, usdEquivalentCents: usdCents, ibanMasked: masked })]
+      );
+
+      return { request: this._mapPayoutRequest(ins.rows[0]), wallet: updatedWallet };
     });
   }
 
@@ -1694,54 +3280,232 @@ export class PostgresLedgerStore {
       const rRes = await c.query(`SELECT * FROM payout_requests WHERE id = $1 FOR UPDATE`, [requestId]);
       if (rRes.rowCount === 0) throw new CallEngineError('PAYOUT_NOT_FOUND', 'طلب السحب غير موجود', 404);
       const reqRow = rRes.rows[0];
+      if (reviewerUid === reqRow.uid) {
+        throw new CallEngineError('SELF_APPROVAL_FORBIDDEN', 'لا يمكن للمستخدم مراجعة أو اعتماد طلب السحب الخاص به', 403);
+      }
       if (reqRow.status === 'PAID' || reqRow.status === 'REJECTED') {
         throw new CallEngineError('PAYOUT_ALREADY_FINALIZED', 'تم البت في هذا الطلب مسبقاً', 409);
       }
+
+      const earliestMs = reqRow.earliest_review_at ? new Date(reqRow.earliest_review_at).getTime() : 0;
+      if ((norm === 'APPROVED' || norm === 'PAID') && this.now() < earliestMs) {
+        throw new CallEngineError('PAYOUT_HOLD_ACTIVE', 'طلب السحب لا يزال ضمن فترة الحجز الأمني (24 ساعة) قبل الاعتماد أو الصرف.', 409, {
+          earliestReviewAtMs: earliestMs
+        });
+      }
+
+      const amountCoins = Number(reqRow.amount_coins);
+      const fromSub = Number(reqRow.from_sub_agents_coins || 0);
+      const fromHost = reqRow.from_host_coins !== undefined && reqRow.from_host_coins !== null
+        ? Number(reqRow.from_host_coins)
+        : Math.max(0, amountCoins - fromSub);
+
       if (norm === 'REJECTED') {
-        await c.query(
-          `UPDATE wallet_accounts SET reserved_payout_coins = GREATEST(0, reserved_payout_coins - $1), host_earnings_coins = host_earnings_coins + $1, updated_at = NOW() WHERE uid = $2`,
-          [reqRow.amount_coins, reqRow.uid]
+        const wUpd = await c.query(
+          `UPDATE wallet_accounts
+           SET reserved_payout_coins = GREATEST(0, reserved_payout_coins - $1),
+               sub_agents_earnings_coins = sub_agents_earnings_coins + $2,
+               host_earnings_coins = host_earnings_coins + $3,
+               updated_at = NOW()
+           WHERE uid = $4 RETURNING *`,
+          [amountCoins, fromSub, fromHost, reqRow.uid]
         );
+        const wAfter = this._mapWallet(wUpd.rows[0]);
+        if (fromSub > 0) {
+          await c.query(
+            `INSERT INTO ledger_entries (entry_uuid, uid, entry_type, bucket, delta, balance_after, idempotency_key, reference_id, description)
+             VALUES ($1,$2,'WITHDRAWAL_REFUND','AGENCY_EARNINGS',$3,$4,$5,$6,$7)`,
+            [crypto.randomUUID(), reqRow.uid, fromSub, wAfter.subAgentsEarningsCoins, `payout_refund_ag_${requestId}`, requestId, `استرداد طلب سحب مرفوض إلى أرباح الوكالة (+${fromSub} نقطة)`]
+          );
+        }
+        if (fromHost > 0) {
+          await c.query(
+            `INSERT INTO ledger_entries (entry_uuid, uid, entry_type, bucket, delta, balance_after, idempotency_key, reference_id, description)
+             VALUES ($1,$2,'WITHDRAWAL_REFUND','HOST_EARNINGS',$3,$4,$5,$6,$7)`,
+            [crypto.randomUUID(), reqRow.uid, fromHost, wAfter.hostEarningsCoins, `payout_refund_host_${requestId}`, requestId, `استرداد طلب سحب مرفوض إلى أرباح المضيف (+${fromHost} نقطة)`]
+          );
+        }
       } else if (norm === 'PAID') {
+        const wUpd = await c.query(
+          `UPDATE wallet_accounts
+           SET reserved_payout_coins = GREATEST(0, reserved_payout_coins - $1),
+               updated_at = NOW()
+           WHERE uid = $2 RETURNING *`,
+          [amountCoins, reqRow.uid]
+        );
+        const wAfter = this._mapWallet(wUpd.rows[0]);
         await c.query(
-          `UPDATE wallet_accounts SET reserved_payout_coins = GREATEST(0, reserved_payout_coins - $1), updated_at = NOW() WHERE uid = $2`,
-          [reqRow.amount_coins, reqRow.uid]
+          `INSERT INTO ledger_entries (entry_uuid, uid, entry_type, bucket, delta, balance_after, idempotency_key, reference_id, description)
+           VALUES ($1,$2,'WITHDRAWAL','RESERVED_PAYOUT',$3,$4,$5,$6,$7)`,
+          [crypto.randomUUID(), reqRow.uid, -amountCoins, wAfter.reservedPayoutCoins, `payout_paid_${requestId}`, paymentReference || requestId, `صرف أرباح معتمد (${amountCoins} نقطة)`]
         );
       }
+
       const upd = await c.query(
         `UPDATE payout_requests SET status=$1, reviewer_uid=$2, reviewer_note=$3, payment_reference=COALESCE($4, payment_reference), reviewed_at=NOW() WHERE id=$5 RETURNING *`,
         [norm, reviewerUid, note, paymentReference, requestId]
+      );
+      await c.query(
+        `INSERT INTO audit_logs (actor_uid, action, target_id, details) VALUES ($1,$2,$3,$4)`,
+        [reviewerUid, `PAYOUT_${norm}`, requestId, JSON.stringify({ uid: reqRow.uid, amountCoins, note, paymentReference })]
       );
       const wRes = await c.query(`SELECT * FROM wallet_accounts WHERE uid = $1`, [reqRow.uid]);
       return { request: this._mapPayoutRequest(upd.rows[0]), wallet: this._mapWallet(wRes.rows[0]) };
     });
   }
 
-  async adminSetUserRolesAndCommission({ reviewerUid, targetUid, isAgent, isHost, isAdmin, agentCommissionPercent, hostCommissionPercent, agencyName }) {
+  async setUserStatus({ reviewerUid, targetUid, status, reason = '' }) {
     return this._withTx(async (c) => {
+      const normalized = String(status || '').trim().toUpperCase();
+      if (!VALID_USER_STATUSES.has(normalized)) {
+        throw new CallEngineError('INVALID_STATUS', 'الحالة يجب أن تكون ACTIVE أو SUSPENDED أو BANNED', 400);
+      }
       const { user } = await this._ensureUserTx(c, { uid: targetUid });
-      const resolvedAgencyId = (typeof isAgent === 'boolean' ? isAgent : user.isAgent) && !user.agencyId
+      const nowMs = this.now();
+      const prevStatus = user.status || 'ACTIVE';
+      const nextReason = normalized === 'ACTIVE' ? null : (String(reason || '').trim() || 'إجراء إداري');
+
+      const res = await c.query(
+        `UPDATE users
+         SET status = $1,
+             status_reason = $2,
+             status_updated_at = $3,
+             status_updated_by = $4,
+             updated_at = NOW()
+         WHERE uid = $5
+         RETURNING *`,
+        [normalized, nextReason, nowMs, reviewerUid, targetUid]
+      );
+      await c.query(
+        `INSERT INTO audit_logs (actor_uid, action, target_id, details) VALUES ($1,'USER_STATUS_UPDATED',$2,$3)`,
+        [reviewerUid, targetUid, JSON.stringify({ previousStatus: prevStatus, status: normalized, reason: nextReason })]
+      );
+      return { user: this._mapUser(res.rows[0]) };
+    });
+  }
+
+  async listHostApplications(status = 'PENDING') {
+    const target = String(status || 'PENDING').toUpperCase();
+    const res = target === 'ALL'
+      ? await this.pool.query(`SELECT * FROM users WHERE deleted_at IS NULL AND host_status <> 'NONE' ORDER BY updated_at DESC LIMIT 200`)
+      : await this.pool.query(`SELECT * FROM users WHERE deleted_at IS NULL AND host_status = $1 ORDER BY updated_at DESC LIMIT 200`, [target]);
+    return res.rows.map((r) => this._mapUser(r));
+  }
+
+  async reviewHostApplication({ reviewerUid, targetUid, decision, hostCommissionPercent = null, reason = null }) {
+    return this._withTx(async (c) => {
+      const normalized = String(decision || '').trim().toUpperCase();
+      if (normalized !== 'APPROVED' && normalized !== 'REJECTED') {
+        throw new CallEngineError('INVALID_DECISION', 'القرار يجب أن يكون APPROVED أو REJECTED', 400);
+      }
+      const { user } = await this._ensureUserTx(c, { uid: targetUid });
+      if (hostCommissionPercent !== null && hostCommissionPercent !== undefined) {
+        validateCommissionPair(hostCommissionPercent, user.agentCommissionPercent);
+      }
+      const nextIsHost = normalized === 'APPROVED';
+      const res = await c.query(
+        `UPDATE users
+         SET is_host = $1,
+             host_status = $2,
+             host_commission_percent = COALESCE($3, host_commission_percent),
+             updated_at = NOW()
+         WHERE uid = $4
+         RETURNING *`,
+        [nextIsHost, normalized, hostCommissionPercent ?? null, targetUid]
+      );
+      const updatedUser = this._mapUser(res.rows[0]);
+      await c.query(
+        `INSERT INTO audit_logs (actor_uid, action, target_id, details) VALUES ($1,'REVIEW_HOST_APPLICATION',$2,$3)`,
+        [
+          reviewerUid,
+          targetUid,
+          JSON.stringify({
+            decision: normalized,
+            hostCommissionPercent: updatedUser.hostCommissionPercent,
+            agencyName: updatedUser.agencyName,
+            reason: reason || null
+          })
+        ]
+      );
+      return { user: updatedUser };
+    });
+  }
+
+  async adminSetUserRolesAndCommission({
+    reviewerUid,
+    reviewerAdminRole = 'SUPER_ADMIN',
+    targetUid,
+    isAgent,
+    isHost,
+    isAdmin,
+    adminRole,
+    agentCommissionPercent,
+    hostCommissionPercent,
+    agencyName
+  }) {
+    return this._withTx(async (c) => {
+      const isModifyingAdminPrivileges = typeof isAdmin === 'boolean' || adminRole !== undefined;
+      if (isModifyingAdminPrivileges && reviewerUid !== 'system_auth_claims' && reviewerAdminRole !== 'SUPER_ADMIN') {
+        throw new CallEngineError(
+          'FORBIDDEN_SUPER_ADMIN_REQUIRED',
+          'تعيين أو تعديل الأدوار الإدارية محصور بالمشرف الأعلى (SUPER_ADMIN) فقط.',
+          403
+        );
+      }
+
+      const { user } = await this._ensureUserTx(c, { uid: targetUid });
+      if (agentCommissionPercent !== undefined || hostCommissionPercent !== undefined) {
+        const nextHost = hostCommissionPercent !== undefined ? hostCommissionPercent : user.hostCommissionPercent;
+        const nextAgent = agentCommissionPercent !== undefined ? agentCommissionPercent : user.agentCommissionPercent;
+        validateCommissionPair(nextHost, nextAgent);
+      }
+
+      let nextIsAdmin = null;
+      let nextAdminRole = null;
+      if (adminRole !== undefined) {
+        const upperRole = String(adminRole || 'NONE').trim().toUpperCase();
+        if (!VALID_ADMIN_ROLES.has(upperRole)) {
+          throw new CallEngineError('INVALID_ADMIN_ROLE', 'الدور الإداري غير معروف', 400);
+        }
+        nextAdminRole = upperRole;
+        nextIsAdmin = upperRole !== 'NONE';
+      } else if (typeof isAdmin === 'boolean') {
+        nextIsAdmin = isAdmin;
+        nextAdminRole = isAdmin ? (user.adminRole && user.adminRole !== 'NONE' ? user.adminRole : 'SUPER_ADMIN') : 'NONE';
+      }
+
+      const nextIsAgent = typeof isAgent === 'boolean' ? isAgent : user.isAgent;
+      const resolvedAgencyId = nextIsAgent && !user.agencyId
         ? `ag_${targetUid.slice(0, 8)}`
         : user.agencyId;
+      let resolvedAgencyName = agencyName !== undefined ? String(agencyName).trim() : null;
+      if (nextIsAgent && !user.agencyId && !resolvedAgencyName) {
+        resolvedAgencyName = user.agencyName || `وكالة ${user.displayName}`;
+      }
+
       const res = await c.query(
         `UPDATE users SET
            is_agent = COALESCE($1, is_agent),
            is_host = COALESCE($2, is_host),
            host_status = CASE WHEN $2 = TRUE THEN 'APPROVED' WHEN $2 = FALSE THEN 'NONE' ELSE host_status END,
            is_admin = COALESCE($3, is_admin),
+           admin_role = COALESCE($9, admin_role),
            agent_commission_percent = COALESCE($4, agent_commission_percent),
            host_commission_percent = COALESCE($5, host_commission_percent),
            agency_id = CASE WHEN $6 <> '' THEN $6 ELSE agency_id END,
+           agency_name = COALESCE($8, agency_name),
            updated_at = NOW()
          WHERE uid = $7 RETURNING *`,
         [
           typeof isAgent === 'boolean' ? isAgent : null,
           typeof isHost === 'boolean' ? isHost : null,
-          typeof isAdmin === 'boolean' ? isAdmin : null,
+          nextIsAdmin,
           agentCommissionPercent ?? null,
           hostCommissionPercent ?? null,
           resolvedAgencyId,
-          targetUid
+          targetUid,
+          resolvedAgencyName,
+          nextAdminRole
         ]
       );
       const updatedUser = this._mapUser(res.rows[0]);
@@ -1750,12 +3514,24 @@ export class PostgresLedgerStore {
           `INSERT INTO agencies (id, owner_uid, name, country, commission_percent)
            VALUES ($1,$2,$3,$4,$5)
            ON CONFLICT (id) DO UPDATE SET commission_percent=EXCLUDED.commission_percent, name=CASE WHEN $3 <> '' THEN $3 ELSE agencies.name END`,
-          [resolvedAgencyId, targetUid, agencyName || `وكالة ${updatedUser.displayName}`, updatedUser.country || '', updatedUser.agentCommissionPercent]
+          [resolvedAgencyId, targetUid, updatedUser.agencyName || `وكالة ${updatedUser.displayName}`, updatedUser.country || '', updatedUser.agentCommissionPercent]
         );
       }
       await c.query(
         `INSERT INTO audit_logs (actor_uid, action, target_id, details) VALUES ($1,'ADMIN_UPDATE_USER_ROLES',$2,$3)`,
-        [reviewerUid, targetUid, JSON.stringify({ isAgent, isHost, isAdmin, agentCommissionPercent, agencyName })]
+        [
+          reviewerUid,
+          targetUid,
+          JSON.stringify({
+            isAgent: updatedUser.isAgent,
+            isHost: updatedUser.isHost,
+            isAdmin: updatedUser.isAdmin,
+            adminRole: updatedUser.adminRole,
+            agentCommissionPercent: updatedUser.agentCommissionPercent,
+            hostCommissionPercent: updatedUser.hostCommissionPercent,
+            agencyName: updatedUser.agencyName
+          })
+        ]
       );
       return updatedUser;
     });
@@ -1853,12 +3629,167 @@ export class PostgresLedgerStore {
   }
 
   async resolveModerationReport({ reviewerUid, reportId, status = 'RESOLVED', actionTaken = 'WARNING' }) {
+    return this._withTx(async (c) => {
+      const res = await c.query(
+        `UPDATE moderation_reports SET status=$1, action_taken=$2, reviewer_uid=$3, reviewed_at=NOW() WHERE id=$4 RETURNING *`,
+        [status, actionTaken, reviewerUid, reportId]
+      );
+      if (res.rowCount === 0) throw new CallEngineError('REPORT_NOT_FOUND', 'البلاغ غير موجود', 404);
+      const mapped = this._mapModerationReport(res.rows[0]);
+      if (mapped.targetUserId && (actionTaken === 'SUSPEND_USER' || actionTaken === 'BAN_USER')) {
+        const targetStatus = actionTaken === 'BAN_USER' ? 'BANNED' : 'SUSPENDED';
+        await this._ensureUserTx(c, { uid: mapped.targetUserId });
+        await c.query(
+          `UPDATE users
+           SET status = $1,
+               status_reason = $2,
+               status_updated_at = $3,
+               status_updated_by = $4,
+               updated_at = NOW()
+           WHERE uid = $5`,
+          [targetStatus, `بلاغ رقابي: ${mapped.reason}`, this.now(), reviewerUid, mapped.targetUserId]
+        );
+      }
+      await c.query(
+        `INSERT INTO audit_logs (actor_uid, action, target_id, details) VALUES ($1,'RESOLVE_MODERATION_REPORT',$2,$3)`,
+        [reviewerUid, reportId, JSON.stringify({ status, actionTaken, targetUserId: mapped.targetUserId })]
+      );
+      return mapped;
+    });
+  }
+
+  _mapModerationSample(r) {
+    return {
+      id: r.id,
+      streamId: r.stream_id || null,
+      userUid: r.user_uid,
+      sampleType: r.sample_type,
+      provider: r.provider,
+      status: r.status,
+      riskScore: Number(r.risk_score || 0),
+      labels: typeof r.labels_json === 'string' ? JSON.parse(r.labels_json) : (r.labels_json || []),
+      estimatedCostUsd: Number(r.estimated_cost_usd || 0),
+      actionTaken: r.action_taken || 'NONE',
+      reviewerUid: r.reviewer_uid || null,
+      details: r.details || '',
+      createdAtMs: r.created_at ? new Date(r.created_at).getTime() : this.now(),
+      reviewedAtMs: r.reviewed_at ? new Date(r.reviewed_at).getTime() : null
+    };
+  }
+
+  async getModerationDailyUsage(dayKey) {
     const res = await this.pool.query(
-      `UPDATE moderation_reports SET status=$1, action_taken=$2, reviewer_uid=$3, reviewed_at=NOW() WHERE id=$4 RETURNING *`,
-      [status, actionTaken, reviewerUid, reportId]
+      `SELECT * FROM moderation_daily_usage WHERE day_key = $1`,
+      [dayKey]
     );
-    if (res.rowCount === 0) throw new CallEngineError('REPORT_NOT_FOUND', 'البلاغ غير موجود', 404);
-    return this._mapModerationReport(res.rows[0]);
+    if (res.rowCount === 0) {
+      return { dayKey, sampleCount: 0, estimatedCostUsd: 0 };
+    }
+    const r = res.rows[0];
+    return {
+      dayKey: r.day_key,
+      sampleCount: Number(r.sample_count || 0),
+      estimatedCostUsd: Number(r.estimated_cost_usd || 0)
+    };
+  }
+
+  async createModerationSample({
+    id,
+    streamId = null,
+    userUid,
+    sampleType = 'STREAM_FRAME',
+    provider = 'heuristic_local',
+    status = 'CLEAN',
+    riskScore = 0,
+    labels = [],
+    estimatedCostUsd = 0,
+    actionTaken = 'NONE',
+    details = '',
+    dayKey = null,
+    incrementUsage = true
+  }) {
+    return this._withTx(async (c) => {
+      const sampleId = id || `mod_${crypto.randomUUID()}`;
+      const res = await c.query(
+        `INSERT INTO moderation_samples
+          (id, stream_id, user_uid, sample_type, provider, status, risk_score, labels_json, estimated_cost_usd, action_taken, details)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+         RETURNING *`,
+        [
+          sampleId,
+          streamId,
+          userUid,
+          sampleType,
+          provider,
+          status,
+          Number(riskScore || 0),
+          JSON.stringify(Array.isArray(labels) ? labels : []),
+          Number(estimatedCostUsd || 0),
+          actionTaken,
+          String(details || '')
+        ]
+      );
+      if (incrementUsage && dayKey) {
+        await c.query(
+          `INSERT INTO moderation_daily_usage (day_key, sample_count, estimated_cost_usd)
+           VALUES ($1, 1, $2)
+           ON CONFLICT (day_key) DO UPDATE SET
+             sample_count = moderation_daily_usage.sample_count + 1,
+             estimated_cost_usd = moderation_daily_usage.estimated_cost_usd + EXCLUDED.estimated_cost_usd,
+             updated_at = NOW()`,
+          [dayKey, Number(estimatedCostUsd || 0)]
+        );
+      }
+      return this._mapModerationSample(res.rows[0]);
+    });
+  }
+
+  async listModerationSamples(status = 'QUEUE') {
+    const target = String(status || 'QUEUE').toUpperCase();
+    let res;
+    if (target === 'ALL') {
+      res = await this.pool.query(`SELECT * FROM moderation_samples ORDER BY created_at DESC LIMIT 200`);
+    } else if (target === 'QUEUE') {
+      res = await this.pool.query(
+        `SELECT * FROM moderation_samples WHERE status IN ('PENDING_MANUAL_REVIEW', 'FLAGGED', 'BLOCKED') ORDER BY created_at DESC LIMIT 200`
+      );
+    } else {
+      res = await this.pool.query(
+        `SELECT * FROM moderation_samples WHERE status = $1 ORDER BY created_at DESC LIMIT 200`,
+        [target]
+      );
+    }
+    return res.rows.map((r) => this._mapModerationSample(r));
+  }
+
+  async reviewModerationSample({ reviewerUid, sampleId, decision, note = null }) {
+    return this._withTx(async (c) => {
+      const norm = String(decision || '').trim().toUpperCase();
+      if (norm !== 'APPROVED' && norm !== 'CONFIRMED') {
+        throw new CallEngineError('INVALID_DECISION', 'القرار يجب أن يكون APPROVED أو CONFIRMED', 400);
+      }
+      const nextStatus = norm === 'APPROVED' ? 'REVIEWED_APPROVED' : 'REVIEWED_CONFIRMED';
+      const noteSuffix = note ? ` | ${note}` : '';
+      const res = await c.query(
+        `UPDATE moderation_samples
+         SET status = $1,
+             reviewer_uid = $2,
+             details = TRIM(BOTH FROM (details || $3)),
+             reviewed_at = NOW()
+         WHERE id = $4
+         RETURNING *`,
+        [nextStatus, reviewerUid, noteSuffix, sampleId]
+      );
+      if (res.rowCount === 0) {
+        throw new CallEngineError('MODERATION_SAMPLE_NOT_FOUND', 'عينة الفحص غير موجودة', 404);
+      }
+      const mapped = this._mapModerationSample(res.rows[0]);
+      await c.query(
+        `INSERT INTO audit_logs (actor_uid, action, target_id, details) VALUES ($1,'REVIEW_MODERATION_SAMPLE',$2,$3)`,
+        [reviewerUid, sampleId, JSON.stringify({ decision: norm, streamId: mapped.streamId, userUid: mapped.userUid, note })]
+      );
+      return mapped;
+    });
   }
 
   async blockUser({ blockerUid, blockedUid }) {
@@ -1877,8 +3808,51 @@ export class PostgresLedgerStore {
   }
 
   async deleteUserAccount({ uid }) {
-    await this.pool.query(`UPDATE users SET deleted_at=$1, display_name='حساب محذوف', email='', dob=NULL, bio='', photo_url=NULL WHERE uid=$2`, [this.now(), uid]);
-    return { deleted: true, uid };
+    return this._withTx(async (c) => {
+      await c.query(
+        `UPDATE users SET deleted_at=$1, display_name='حساب محذوف', email='', dob=NULL, bio='', photo_url=NULL, updated_at=NOW() WHERE uid=$2`,
+        [this.now(), uid]
+      );
+      await c.query(`DELETE FROM age_verifications WHERE uid=$1`, [uid]);
+      await c.query(`DELETE FROM user_blocks WHERE blocker_uid=$1 OR blocked_uid=$1`, [uid]);
+      await c.query(
+        `INSERT INTO audit_logs (actor_uid, action, target_id, details) VALUES ($1,'ACCOUNT_DELETED',$1,'{}')`,
+        [uid]
+      );
+      return { deleted: true, uid };
+    });
+  }
+
+  async getAuditLogs({ actorUid = null, action = null, targetId = null, limit = 100 } = {}) {
+    const safeLimit = Math.max(1, Math.min(500, Number(limit) || 100));
+    const clauses = [];
+    const params = [];
+    if (actorUid) {
+      params.push(actorUid);
+      clauses.push(`actor_uid = $${params.length}`);
+    }
+    if (action) {
+      params.push(action);
+      clauses.push(`action = $${params.length}`);
+    }
+    if (targetId) {
+      params.push(targetId);
+      clauses.push(`target_id = $${params.length}`);
+    }
+    params.push(safeLimit);
+    const whereSql = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
+    const res = await this.pool.query(
+      `SELECT * FROM audit_logs ${whereSql} ORDER BY id DESC LIMIT $${params.length}`,
+      params
+    );
+    return res.rows.map((r) => ({
+      id: Number(r.id),
+      actorUid: r.actor_uid,
+      action: r.action,
+      targetId: r.target_id || null,
+      details: typeof r.details === 'string' ? JSON.parse(r.details) : (r.details || {}),
+      createdAtMs: r.created_at ? new Date(r.created_at).getTime() : this.now()
+    }));
   }
 
   async processVoidedPurchase({ purchaseToken, reason = 'PLAY_STORE_REFUND' }) {
@@ -1942,7 +3916,6 @@ export class PostgresLedgerStore {
         );
       }
 
-      // Flag hosts who received gifts from this buyer
       const gifts = await c.query(
         `SELECT DISTINCT COALESCE(metadata->>'recipientUid', reference_id) AS recipient_uid FROM ledger_entries WHERE uid = $1 AND entry_type = 'GIFT_SENT'`,
         [tx.uid]
@@ -1968,6 +3941,28 @@ export class PostgresLedgerStore {
       };
     });
   }
+
+  async exportReconciliationSnapshot() {
+    return this._withTx(async (c) => {
+      const wRes = await c.query(`SELECT * FROM wallet_accounts`);
+      const lRes = await c.query(`SELECT * FROM ledger_entries`);
+      const hRes = await c.query(`SELECT * FROM ledger_holds`);
+      const pRes = await c.query(`SELECT * FROM payout_requests`);
+      return {
+        wallets: wRes.rows.map((w) => this._mapWallet(w)),
+        ledgerEntries: lRes.rows.map((e) => ({
+          entryUuid: e.entry_uuid,
+          uid: e.uid,
+          entryType: e.entry_type,
+          bucket: e.bucket,
+          delta: Number(e.delta),
+          balanceAfter: Number(e.balance_after)
+        })),
+        holds: hRes.rows.map((h) => this._mapHold(h)),
+        payoutRequests: pRes.rows.map((p) => this._mapPayoutRequest(p))
+      };
+    });
+  }
 }
 
 export async function createLedgerStore(env = process.env) {
@@ -1977,11 +3972,11 @@ export async function createLedgerStore(env = process.env) {
       connectionString: env.DATABASE_URL,
       ssl: env.PG_SSL === 'true' ? { rejectUnauthorized: false } : undefined
     });
-    const store = new PostgresLedgerStore({ pool });
+    const store = new PostgresLedgerStore({ pool, env });
     await store.init();
     return store;
   }
-  const store = new MemoryLedgerStore();
+  const store = new MemoryLedgerStore({ env });
   await store.init();
   return store;
 }

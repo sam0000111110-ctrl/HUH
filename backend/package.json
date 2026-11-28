@@ -6,6 +6,8 @@
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
+    "migrate": "node scripts/migrate.mjs",
+    "reconcile": "node scripts/reconcile.mjs",
     "test": "node --test test/*.test.js"
   },
   "dependencies": {

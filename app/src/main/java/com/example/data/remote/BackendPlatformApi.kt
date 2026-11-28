@@ -13,6 +13,7 @@ import retrofit2.http.DELETE
 import retrofit2.http.GET
 import retrofit2.http.Header
 import retrofit2.http.POST
+import retrofit2.http.PUT
 import retrofit2.http.Path
 import retrofit2.http.Query
 import java.util.concurrent.TimeUnit
@@ -53,9 +54,11 @@ data class BackendWalletDto(
     val uid: String = "",
     val pointsBalance: Int = 0,
     val debtCoins: Int = 0,
+    val heldCoins: Int = 0,
     val hostEarningsCoins: Int = 0,
     val subAgentsEarningsCoins: Int = 0,
     val reservedPayoutCoins: Int = 0,
+    val platformRevenueCoins: Int = 0,
     val totalAccumulatedPoints: Int = 0,
     val totalPointsSpent: Int = 0,
     val lastDailyClaimMs: Long = 0L
@@ -244,10 +247,46 @@ data class PayoutRequestDto(
     val bankAccountHolder: String = "",
     val bankName: String = "",
     val ibanOrAccount: String = "",
+    val ibanMasked: String = "",
     val status: String = "PENDING_REVIEW",
     val reviewerNote: String? = null,
     val paymentReference: String? = null,
     val createdAtMs: Long = 0L
+)
+
+@Keep
+@JsonClass(generateAdapter = true)
+data class ServerGiftDto(
+    val giftId: String = "",
+    val giftName: String = "",
+    val emoji: String = "",
+    val coinsCost: Int = 0
+)
+
+@Keep
+@JsonClass(generateAdapter = true)
+data class ServerGiftsListResponseDto(
+    val gifts: List<ServerGiftDto> = emptyList()
+)
+
+@Keep
+@JsonClass(generateAdapter = true)
+data class EconomyConfigDto(
+    val hostCommissionPercent: Int = 50,
+    val agentCommissionPercent: Int = 20,
+    val platformCommissionPercent: Int = 30,
+    val minPlatformPercent: Int = 15,
+    val coinsPerUsd: Int = 250,
+    val minPayoutCoins: Int = 500,
+    val payoutHoldHours: Int = 24,
+    val dailyFreeRewardCapCoins: Int = 25
+)
+
+@Keep
+@JsonClass(generateAdapter = true)
+data class UpdateEconomyConfigRequestDto(
+    val hostCommissionPercent: Int? = null,
+    val agentCommissionPercent: Int? = null
 )
 
 @Keep
@@ -492,15 +531,22 @@ interface BackendPlatformApi {
         @Query("limit") limit: Int = 50
     ): Response<WalletSummaryResponseDto>
 
+    @GET("api/wallet/gifts")
+    suspend fun getServerGiftCatalog(
+        @Header("Authorization") bearerToken: String
+    ): Response<ServerGiftsListResponseDto>
+
     @POST("api/wallet/daily-bonus")
     suspend fun claimDailyBonus(
-        @Header("Authorization") bearerToken: String
+        @Header("Authorization") bearerToken: String,
+        @Header("X-Device-Id") deviceId: String? = null
     ): Response<DailyBonusResponseDto>
 
     @POST("api/wallet/mission-reward")
     suspend fun claimMissionReward(
         @Header("Authorization") bearerToken: String,
-        @Body body: MissionRewardRequestDto
+        @Body body: MissionRewardRequestDto,
+        @Header("X-Device-Id") deviceId: String? = null
     ): Response<MissionRewardResponseDto>
 
     @POST("api/host/apply")
@@ -664,6 +710,17 @@ interface BackendPlatformApi {
         @Path("uid") uid: String,
         @Body body: AdminUpdateRolesRequestDto
     ): Response<AdminUpdateRolesResponseDto>
+
+    @GET("api/admin/economy/config")
+    suspend fun getEconomyConfigAdmin(
+        @Header("Authorization") bearerToken: String
+    ): Response<EconomyConfigDto>
+
+    @PUT("api/admin/economy/config")
+    suspend fun updateEconomyConfigAdmin(
+        @Header("Authorization") bearerToken: String,
+        @Body body: UpdateEconomyConfigRequestDto
+    ): Response<EconomyConfigDto>
 
     @GET("api/admin/reports")
     suspend fun listAdminReports(

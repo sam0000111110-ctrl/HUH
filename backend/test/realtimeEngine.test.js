@@ -45,6 +45,18 @@ async function apiFetch(baseUrl, path, { method = 'GET', token = null, body = nu
   return { status: res.status, json };
 }
 
+async function approveAdult(ledger, uid) {
+  await ledger.submitAgeVerification({
+    uid,
+    displayName: uid,
+    email: `${uid}@huh.app`,
+    dob: '1995-03-15',
+    acceptedTermsAt: 1000,
+    acceptedPrivacyAt: 1000
+  });
+  await ledger.reviewAgeVerification({ reviewerUid: 'admin_1', targetUid: uid, decision: 'APPROVED' });
+}
+
 test('Phase D: Live broadcast lifecycle, publisher/subscriber JWTs, atomic gift, and host/webhook close', async () => {
   const closedRooms = [];
   const srv = await startTestServer({
@@ -74,6 +86,7 @@ test('Phase D: Live broadcast lifecycle, publisher/subscriber JWTs, atomic gift,
       priceUsd: 0.99,
       purchaseToken: 'ptok_viewer_1'
     });
+    await approveAdult(ledger, 'viewer_1');
 
     // 1. Unverified host blocked from starting broadcast (403)
     const unverifiedRes = await apiFetch(srv.baseUrl, '/api/streams', {
@@ -203,17 +216,20 @@ test('Phase D: Matchmaking queue pairs compatible users atomically, rejects insu
       purchaseToken: 'ptok_u2'
     });
     await ledger.ensureUser({ uid: 'user_3', displayName: 'BrokeUser', email: 'b@huh.app' });
+    await approveAdult(ledger, 'user_1');
+    await approveAdult(ledger, 'user_2');
+    await approveAdult(ledger, 'user_3');
 
-    // Insufficient balance rejected
+    // Insufficient balance rejected (402 from holdCoins)
     const brokeRes = await apiFetch(srv.baseUrl, '/api/match/join', {
       method: 'POST',
       token: 'u3_tok',
       body: { chatType: 'VIDEO' }
     });
-    assert.equal(brokeRes.status, 400);
+    assert.equal(brokeRes.status, 402);
     assert.equal(brokeRes.json.error, 'INSUFFICIENT_COINS');
 
-    // User 1 queues -> WAITING
+    // User 1 queues -> WAITING and coins are held (not yet spent)
     const q1 = await apiFetch(srv.baseUrl, '/api/match/join', {
       method: 'POST',
       token: 'u1_tok',
@@ -221,8 +237,10 @@ test('Phase D: Matchmaking queue pairs compatible users atomically, rejects insu
     });
     assert.equal(q1.status, 200);
     assert.equal(q1.json.status, 'WAITING');
+    assert.equal(q1.json.wallet.pointsBalance, 17);
+    assert.equal(q1.json.wallet.heldCoins, 3);
 
-    // User 2 joins compatible queue -> MATCHED immediately + debited atomically
+    // User 2 joins compatible queue -> MATCHED immediately + both holds captured atomically
     const q2 = await apiFetch(srv.baseUrl, '/api/match/join', {
       method: 'POST',
       token: 'u2_tok',
@@ -233,13 +251,15 @@ test('Phase D: Matchmaking queue pairs compatible users atomically, rejects insu
     assert.equal(q2.json.partner.uid, 'user_1');
     assert.equal(q2.json.costCoins, 7); // 3 video + 2 gender + 2 country
     assert.equal(q2.json.wallet.pointsBalance, 13);
+    assert.equal(q2.json.wallet.heldCoins, 0);
 
-    // User 1 polls -> receives MATCHED + debited 3 coins
+    // User 1 polls -> receives MATCHED + heldCoins released/captured (0 held, 17 balance)
     const p1 = await apiFetch(srv.baseUrl, '/api/match/poll', { token: 'u1_tok' });
     assert.equal(p1.status, 200);
     assert.equal(p1.json.status, 'MATCHED');
     assert.equal(p1.json.partner.uid, 'user_2');
     assert.equal(p1.json.wallet.pointsBalance, 17);
+    assert.equal(p1.json.wallet.heldCoins, 0);
 
     // User 1 leaves match -> room closed
     const leave1 = await apiFetch(srv.baseUrl, '/api/match/leave', {
@@ -249,6 +269,48 @@ test('Phase D: Matchmaking queue pairs compatible users atomically, rejects insu
     });
     assert.equal(leave1.status, 200);
     assert.equal(leave1.json.status, 'IDLE');
+  } finally {
+    await srv.close();
+  }
+});
+
+test('WP-1 A8: Matchmaking releases held coins when leaving waiting queue cleanly', async () => {
+  const srv = await startTestServer({
+    customTokens: {
+      u1_tok: { uid: 'hold_user_1', name: 'H1', email: 'h1@huh.app', isAdmin: false }
+    }
+  });
+  try {
+    const ledger = await srv.getLedger();
+    await ledger.creditPlayPurchase({
+      uid: 'hold_user_1',
+      packageId: 'pkg_100',
+      productId: 'ayer_coins_100',
+      coinsCredited: 20,
+      priceUsd: 0.99,
+      purchaseToken: 'ptok_hold_u1'
+    });
+    await approveAdult(ledger, 'hold_user_1');
+
+    const joinRes = await apiFetch(srv.baseUrl, '/api/match/join', {
+      method: 'POST',
+      token: 'u1_tok',
+      body: { chatType: 'VIDEO', genderFilter: 'FEMALE' } // 5 coins
+    });
+    assert.equal(joinRes.status, 200);
+    assert.equal(joinRes.json.status, 'WAITING');
+    assert.equal(joinRes.json.wallet.pointsBalance, 15);
+    assert.equal(joinRes.json.wallet.heldCoins, 5);
+
+    const leaveRes = await apiFetch(srv.baseUrl, '/api/match/leave', {
+      method: 'POST',
+      token: 'u1_tok',
+      body: {}
+    });
+    assert.equal(leaveRes.status, 200);
+    assert.equal(leaveRes.json.status, 'IDLE');
+    assert.equal(leaveRes.json.wallet.pointsBalance, 20);
+    assert.equal(leaveRes.json.wallet.heldCoins, 0);
   } finally {
     await srv.close();
   }

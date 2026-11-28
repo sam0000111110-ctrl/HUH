@@ -652,7 +652,7 @@ fun AgenciesScreen(
                             color = AyerGold
                         )
                         Text(
-                            text = "≈ $${String.format("%.2f", withdrawableCoins / 10.0)} دولار أمريكي (الحد الأدنى للسحب 500 نقطة)",
+                            text = "≈ $${String.format("%.2f", withdrawableCoins / 250.0)} دولار أمريكي (الحد الأدنى للسحب 500 نقطة)",
                             fontSize = 12.sp,
                             fontWeight = FontWeight.SemiBold,
                             color = Color(0xFF00E676)
@@ -845,10 +845,10 @@ fun AgenciesScreen(
                         )
                     }
                     Slider(
-                        value = adminCommissionSlider,
+                        value = adminCommissionSlider.coerceIn(5f, 35f),
                         onValueChange = { adminCommissionSlider = it },
-                        valueRange = 5f..50f,
-                        steps = 8,
+                        valueRange = 5f..35f,
+                        steps = 5,
                         colors = SliderDefaults.colors(
                             thumbColor = AyerGold,
                             activeTrackColor = AyerPrimary
@@ -860,7 +860,7 @@ fun AgenciesScreen(
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
                         Text(text = "5% (حد أدنى)", fontSize = 10.sp, color = Color.Gray)
-                        Text(text = "50% (حد أقصى)", fontSize = 10.sp, color = Color.Gray)
+                        Text(text = "35% (مع بقاء ≥15% للمنصة)", fontSize = 10.sp, color = Color.Gray)
                     }
 
                     Spacer(modifier = Modifier.height(14.dp))
@@ -1041,7 +1041,7 @@ fun AgenciesScreen(
             text = {
                 Column(modifier = Modifier.fillMaxWidth()) {
                     Text(
-                        text = "الرصيد القابل للسحب: $withdrawableCoins نقطة (≈ $${String.format("%.2f", withdrawableCoins / 10.0)})",
+                        text = "الرصيد القابل للسحب: $withdrawableCoins نقطة (≈ $${String.format("%.2f", withdrawableCoins / 250.0)})",
                         fontSize = 12.sp,
                         color = AyerCyan
                     )
@@ -1194,8 +1194,11 @@ private fun AgencyPayoutCard(payout: com.example.data.remote.PayoutRequestDto) {
                 }
             }
             Spacer(modifier = Modifier.height(6.dp))
+            val shownAccount = payout.ibanMasked.ifBlank {
+                payout.ibanOrAccount.takeLast(4).padStart(8, '*')
+            }
             Text(
-                text = "${payout.payoutMethod} • ${payout.bankName} (${payout.ibanOrAccount.takeLast(6).padStart(payout.ibanOrAccount.length.coerceAtMost(10), '*')})",
+                text = "${payout.payoutMethod} • ${payout.bankName} ($shownAccount)",
                 fontSize = 11.sp,
                 color = HuhTheme.colors.textSecondary
             )

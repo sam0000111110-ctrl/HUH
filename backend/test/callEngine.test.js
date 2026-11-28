@@ -241,9 +241,19 @@ test('Completion logger records start/end times and participants in JSON store a
     DATA_FILE: dataFile
   };
 
-  const { server } = createCallServer({ env: sharedEnv });
+  const { server, getLedger } = createCallServer({ env: sharedEnv });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const baseUrl = `http://127.0.0.1:${server.address().port}`;
+  const ledger = await getLedger();
+  await ledger.submitAgeVerification({
+    uid: 'user_caller',
+    displayName: 'سامر',
+    email: 'caller@ayer.test',
+    dob: '1995-01-01',
+    acceptedTermsAt: 1000,
+    acceptedPrivacyAt: 1000
+  });
+  await ledger.reviewAgeVerification({ reviewerUid: 'admin_1', targetUid: 'user_caller', decision: 'APPROVED' });
 
   let completedCallId = '';
   try {

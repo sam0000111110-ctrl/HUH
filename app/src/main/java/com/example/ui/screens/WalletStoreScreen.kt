@@ -169,7 +169,7 @@ fun WalletStoreScreen(
                                 )
                             }
                             Text(
-                                text = "≈ $${String.format(Locale.US, "%.2f", balance / 10.0)} دولار أمريكي",
+                                text = "≈ $${String.format(Locale.US, "%.2f", balance / 250.0)} دولار أمريكي",
                                 fontSize = 11.sp,
                                 color = HuhTheme.colors.textMuted
                             )
